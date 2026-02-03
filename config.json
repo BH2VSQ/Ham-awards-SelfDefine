@@ -1,0 +1,12 @@
+{
+  "installed": true,
+  "adminPath": "admin",
+  "jwtSecret": "ae670e514eaaf85710cba0d863b656ff33f2b13f27bb009591fecb85d7407f047b60e8cf464dc24b51718e82bad59f23ec1b946b81ade46f58128e73169ba38a",
+  "db": {
+    "user": "award_vsq",
+    "host": "192.168.31.29",
+    "database": "award",
+    "password": "0d000721",
+    "port": 5432
+  }
+}
