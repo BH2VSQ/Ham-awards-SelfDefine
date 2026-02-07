@@ -1,10 +1,6 @@
 import React, { useState } from 'react';
 import { Server, Database, Lock, User, Shield, HardDrive, Globe, CheckCircle } from 'lucide-react';
 
-/**
- * InstallView - 系统初始化安装界面
- * 负责收集数据库、管理员账户、MinIO 存储及安全配置
- */
 export default function InstallView({ onComplete, t }) {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -16,6 +12,7 @@ export default function InstallView({ onComplete, t }) {
     dbName: 'ham_awards',
     adminCall: '',
     adminPass: '',
+    adminPath: 'admin',
     minioEndpoint: '',
     minioPort: '9000',
     minioAccessKey: '',
@@ -49,7 +46,7 @@ export default function InstallView({ onComplete, t }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || '安装失败');
-      alert('安装成功！系统将重新加载。');
+      alert('安装成功！页面将刷新。');
       onComplete();
     } catch (err) {
       alert(err.message);
@@ -63,16 +60,9 @@ export default function InstallView({ onComplete, t }) {
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden">
         <div className="bg-slate-900 p-8 text-white">
           <h1 className="text-2xl font-bold flex items-center gap-3">
-            <Server className="text-blue-500" /> {t.installTitle}
+            <Server className="text-blue-500" /> 系统初始化
           </h1>
-          <p className="text-slate-400 text-sm mt-2">欢迎使用 Ham Awards 系统,请按照指引完成初始化配置。</p>
-          
-          {/* 进度条 */}
-          <div className="flex gap-2 mt-8">
-            {[1, 2, 3].map(i => (
-              <div key={i} className={`h-1 flex-1 rounded-full transition-colors ${step >= i ? 'bg-blue-500' : 'bg-slate-700'}`}></div>
-            ))}
-          </div>
+          <p className="text-slate-400 text-sm mt-2">HAM AWARDS SYSTEM Setup Wizard</p>
         </div>
 
         <form onSubmit={handleSubmit} className="p-8">
@@ -80,26 +70,11 @@ export default function InstallView({ onComplete, t }) {
             <div className="space-y-6">
               <h3 className="font-bold text-lg flex items-center gap-2"><Database className="text-blue-600"/> 数据库配置 (PostgreSQL)</h3>
               <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">主机地址</label>
-                  <input name="dbHost" value={config.dbHost} onChange={handleChange} required className="w-full border rounded-lg p-3" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">端口</label>
-                  <input name="dbPort" value={config.dbPort} onChange={handleChange} required className="w-full border rounded-lg p-3" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">用户名</label>
-                  <input name="dbUser" value={config.dbUser} onChange={handleChange} required className="w-full border rounded-lg p-3" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">密码</label>
-                  <input name="dbPass" type="password" value={config.dbPass} onChange={handleChange} required className="w-full border rounded-lg p-3" />
-                </div>
-                <div className="col-span-2 space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">数据库名称</label>
-                  <input name="dbName" value={config.dbName} onChange={handleChange} required className="w-full border rounded-lg p-3" />
-                </div>
+                <input name="dbHost" value={config.dbHost} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="Host" />
+                <input name="dbPort" value={config.dbPort} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="Port" />
+                <input name="dbUser" value={config.dbUser} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="User" />
+                <input name="dbPass" type="password" value={config.dbPass} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="Password" />
+                <input name="dbName" value={config.dbName} onChange={handleChange} required className="col-span-2 w-full border rounded-lg p-3" placeholder="Database Name" />
               </div>
               <button type="button" onClick={() => setStep(2)} className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold">下一步</button>
             </div>
@@ -107,24 +82,14 @@ export default function InstallView({ onComplete, t }) {
 
           {step === 2 && (
             <div className="space-y-6">
-              <h3 className="font-bold text-lg flex items-center gap-2"><HardDrive className="text-orange-600"/> MinIO 存储服务配置 (可选)</h3>
-              <p className="text-xs text-slate-400">用于存储奖状背景图及相关图片元素。若暂不配置可留空。</p>
+              <h3 className="font-bold text-lg flex items-center gap-2"><HardDrive className="text-orange-600"/> 存储配置 (MinIO)</h3>
               <div className="grid grid-cols-2 gap-4">
-                <div className="col-span-2 space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">Endpoint (如: s3.example.com)</label>
-                  <input name="minioEndpoint" value={config.minioEndpoint} onChange={handleChange} className="w-full border rounded-lg p-3" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">Access Key</label>
-                  <input name="minioAccessKey" value={config.minioAccessKey} onChange={handleChange} className="w-full border rounded-lg p-3" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">Secret Key</label>
-                  <input name="minioSecretKey" type="password" value={config.minioSecretKey} onChange={handleChange} className="w-full border rounded-lg p-3" />
-                </div>
+                <input name="minioEndpoint" value={config.minioEndpoint} onChange={handleChange} className="col-span-2 w-full border rounded-lg p-3" placeholder="Endpoint (e.g. localhost)" />
+                <input name="minioAccessKey" value={config.minioAccessKey} onChange={handleChange} className="w-full border rounded-lg p-3" placeholder="Access Key" />
+                <input name="minioSecretKey" type="password" value={config.minioSecretKey} onChange={handleChange} className="w-full border rounded-lg p-3" placeholder="Secret Key" />
               </div>
               <div className="flex gap-4">
-                <button type="button" onClick={() => setStep(1)} className="flex-1 bg-slate-100 text-slate-600 py-4 rounded-xl font-bold">上一步</button>
+                <button type="button" onClick={() => setStep(1)} className="flex-1 bg-slate-100 font-bold rounded-xl">上一步</button>
                 <button type="button" onClick={() => setStep(3)} className="flex-1 bg-slate-900 text-white py-4 rounded-xl font-bold">下一步</button>
               </div>
             </div>
@@ -132,28 +97,21 @@ export default function InstallView({ onComplete, t }) {
 
           {step === 3 && (
             <div className="space-y-6">
-              <h3 className="font-bold text-lg flex items-center gap-2"><Shield className="text-red-600"/> 系统管理员设置</h3>
+              <h3 className="font-bold text-lg flex items-center gap-2"><Shield className="text-red-600"/> 管理员与安全</h3>
               <div className="space-y-4">
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">管理员呼号</label>
-                  <input name="adminCall" value={config.adminCall} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="e.g. BH4XXX" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-500 uppercase">管理员密码</label>
-                  <input name="adminPass" type="password" value={config.adminPass} onChange={handleChange} required className="w-full border rounded-lg p-3" />
-                </div>
-                <div className="flex items-center gap-3 p-4 bg-blue-50 rounded-xl">
+                <input name="adminCall" value={config.adminCall} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="管理员呼号" />
+                <input name="adminPass" type="password" value={config.adminPass} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="管理员密码" />
+                <input name="adminPath" value={config.adminPath} onChange={handleChange} required className="w-full border rounded-lg p-3" placeholder="自定义管理路径 (默认: admin)" />
+                
+                <label className="flex items-center gap-3 p-4 bg-blue-50 rounded-xl cursor-pointer">
                   <input type="checkbox" name="useHttps" checked={config.useHttps} onChange={handleChange} className="w-5 h-5 accent-blue-600" />
-                  <div>
-                    <div className="text-sm font-bold text-blue-800">启用 HTTPS 安全传输</div>
-                    <div className="text-xs text-blue-600">建议在生产环境下开启</div>
-                  </div>
-                </div>
+                  <span className="font-bold text-blue-800">启用 HTTPS</span>
+                </label>
               </div>
               <div className="flex gap-4">
-                <button type="button" onClick={() => setStep(2)} className="flex-1 bg-slate-100 text-slate-600 py-4 rounded-xl font-bold">上一步</button>
-                <button type="submit" disabled={loading} className="flex-1 bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-100">
-                  {loading ? '正在安装...' : '完成安装'}
+                <button type="button" onClick={() => setStep(2)} className="flex-1 bg-slate-100 font-bold rounded-xl">上一步</button>
+                <button type="submit" disabled={loading} className="flex-1 bg-blue-600 text-white py-4 rounded-xl font-bold">
+                  {loading ? '安装中...' : '完成配置'}
                 </button>
               </div>
             </div>
