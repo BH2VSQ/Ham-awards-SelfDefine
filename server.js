@@ -228,7 +228,7 @@ const categorizeMode = (mode) => {
     return 'data'; // Default to data for unknown
 };
 
-const evaluateAward = async (userId, awardId) => {
+const evaluateAward = async (userId, awardId, includeQsos = false) => {
     const client = await dbPool.connect();
     try {
         const awardRes = await client.query('SELECT * FROM awards WHERE id = $1', [awardId]);
@@ -289,7 +289,8 @@ const evaluateAward = async (userId, awardId) => {
         // --- Step 2: Target Matching & Scoring ---
         const logic = rules.logic || 'collection';
         const targetType = rules.targets?.type || 'any';
-        const targetList = rules.targets?.list ? rules.targets.list.split(',').map(s=>s.trim().toUpperCase()).filter(s=>s) : [];
+        const rawTargetList = rules.targets?.list ? rules.targets.list.split(',').map(s=>s.trim().toUpperCase()).filter(s=>s) : [];
+        const targetSet = new Set(rawTargetList);
         
         // Helper to get target value from QSO
         const getTargetValue = (qso) => {
@@ -304,22 +305,29 @@ const evaluateAward = async (userId, awardId) => {
         };
 
         // If Target List is provided, filter further
-        if (targetList.length > 0) {
+        // 修正：对于全收集类型，不应在这里过滤掉非目标QSO，否则"missing"计算会出错？
+        // 不，应该过滤。如果QSO的目标值不在TargetList里，它对全收集也没用。
+        if (targetSet.size > 0) {
             filteredQsos = filteredQsos.filter(q => {
                 const val = getTargetValue(q);
-                return val && targetList.includes(val);
+                return val && targetSet.has(val);
             });
         }
 
         let score = 0;
         let uniqueSet = new Set();
+        let qsoMap = new Map(); // Key -> QSO Object (for display)
 
         // --- Step 3: Calculation ---
         if (logic === 'collection') {
             // Count unique entities
             filteredQsos.forEach(q => {
                 const key = getTargetValue(q);
-                if (key) uniqueSet.add(key);
+                if (key) {
+                    uniqueSet.add(key);
+                    // Store the first matching QSO for this target for display
+                    if (!qsoMap.has(key)) qsoMap.set(key, q);
+                }
             });
             score = uniqueSet.size;
         } else {
@@ -338,6 +346,12 @@ const evaluateAward = async (userId, awardId) => {
                 if (deduplication === 'call') dedupKey = call;
                 else if (deduplication === 'call_band') dedupKey = `${call}-${band}`;
                 else if (deduplication === 'slot') dedupKey = `${call}-${band}-${mode}`;
+                // New Deduplication Options
+                else if (deduplication === 'state') dedupKey = (q.state || q.adif_raw.state || '').toUpperCase();
+                else if (deduplication === 'custom') {
+                    const field = rules.deduplicationCustomField || 'call';
+                    dedupKey = (q[field] || q.adif_raw[field] || '').toString().toUpperCase();
+                }
                 // 'none' means no key
 
                 if (dedupKey) {
@@ -350,14 +364,47 @@ const evaluateAward = async (userId, awardId) => {
             }
         }
 
-        // --- Step 4: Multi-level Thresholds (NEW) ---
-        // Normalize thresholds to array and sort descending
+        // --- Breakdown for specific targets (Pre-calculation) ---
+        let breakdown = null;
+        if (targetSet.size > 0) {
+            const missing = [];
+            const achieved_list = [];
+            // Iterate over the required list to preserve order or just check set
+            // Wait, rules.targets.list is the master list
+            rawTargetList.forEach(t => {
+                if (uniqueSet.has(t)) {
+                    achieved_list.push({ target: t, qso: qsoMap.get(t) }); // Store full info
+                } else {
+                    missing.push(t);
+                }
+            });
+            breakdown = {
+                total_required: targetSet.size,
+                achieved: achieved_list, // Array of Objects or Strings? Let's use objects for detail view
+                achieved_keys: Array.from(uniqueSet), // Just keys
+                missing: missing
+            };
+        }
+
+        // --- Step 4: Multi-level Thresholds (NEW: Independent Full Collection) ---
+        // Normalize thresholds to array and sort descending by value
         let thresholds = rules.thresholds || [{ name: 'Award', value: 1 }];
         if (!Array.isArray(thresholds)) thresholds = [thresholds];
+        
+        // Sort: High score first. If values are same, maybe prioritize 'fullCollection'?
+        // Generally user defines levels like Bronze (10), Silver (20), Gold (20 + All)
         thresholds.sort((a, b) => b.value - a.value);
 
-        const achieved = thresholds.find(t => score >= t.value);
-        // Find next target (smallest threshold > current score)
+        // Find the highest achieved level
+        const achieved = thresholds.find(t => {
+            const scoreMet = score >= t.value;
+            // 3. 全收集独立于分数，和分数并列为奖项的判定条件
+            // Check if this threshold requires full collection
+            const collectionMet = !t.fullCollection || (breakdown && breakdown.missing.length === 0);
+            return scoreMet && collectionMet;
+        });
+
+        // Find next target (logic is tricky with mixed conditions, assume next score target for now)
         const next_target = thresholds.slice().reverse().find(t => score < t.value) || thresholds[0];
 
         // Fetch claimed levels
@@ -368,13 +415,24 @@ const evaluateAward = async (userId, awardId) => {
             eligible: !!achieved,
             current_score: score,
             target_score: next_target.value,
-            achieved_level: achieved, // { name, value }
+            achieved_level: achieved, // { name, value, color, fullCollection }
             next_level: next_target,
             claimed_levels: claimedLevels,
             thresholds: thresholds, // Return all levels for UI
+            breakdown,
+            matching_qsos: includeQsos ? filteredQsos.map(q => ({
+                id: q.id,
+                call: q.callsign || q.adif_raw.call,
+                band: q.band || q.adif_raw.band,
+                mode: q.mode || q.adif_raw.mode,
+                date: q.qso_date,
+                grid: q.adif_raw.gridsquare,
+                // Add fields for display logic
+                ...q.adif_raw // safe to spread for frontend display if needed
+            })) : undefined,
             details: {
                 msg: achieved 
-                    ? `已达成: ${achieved.name} (${score})` 
+                    ? `已达成: ${achieved.name} (${score}${achieved.fullCollection ? ' + Full' : ''})` 
                     : `当前 ${score}，下一目标 ${next_target.value} (${next_target.name})`
             }
         };
@@ -508,7 +566,7 @@ app.post('/api/install', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-    const { callsign, password, code, loginType } = req.body;
+    const { callsign, password, code } = req.body;
     try {
         const result = await dbPool.query(`SELECT * FROM users WHERE callsign = $1`, [callsign.toUpperCase()]);
         if (result.rows.length === 0) return res.status(401).json({ error: 'AUTH_FAILED', message: '用户不存在' });
@@ -517,9 +575,8 @@ app.post('/api/auth/login', async (req, res) => {
         const passMatch = await bcrypt.compare(password, user.password_hash);
         if (!passMatch) return res.status(401).json({ error: 'AUTH_FAILED', message: '密码错误' });
 
-        if (loginType === 'admin' && user.role === 'user') {
-            return res.status(403).json({ error: 'ACCESS_DENIED', message: '普通用户请使用普通登录入口' });
-        }
+        // Removed role guard to allow merged login
+        // if (loginType === 'admin' && user.role === 'user') { ... }
 
         if (user.totp_secret) {
             if (!code) return res.status(403).json({ error: '2FA_REQUIRED', message: '请输入两步验证码' });
@@ -589,6 +646,8 @@ app.get('/api/stats/dashboard', verifyToken, async (req, res) => {
             const totalUsers = await client.query('SELECT role, count(*) as count FROM users GROUP BY role');
             const totalAwards = await client.query("SELECT count(*) FROM awards WHERE status = 'approved'");
             const pendingAwards = await client.query("SELECT count(*) FROM awards WHERE status = 'pending'");
+            // 修正：显示当前系统中已经颁发的全部奖状计数
+            const totalIssued = await client.query("SELECT count(*) FROM user_awards");
 
             stats = {
                 system_status: 'running',
@@ -596,6 +655,7 @@ app.get('/api/stats/dashboard', verifyToken, async (req, res) => {
                 total_users: totalUsers.rows,
                 awards_approved: totalAwards.rows[0].count,
                 awards_pending: pendingAwards.rows[0].count,
+                awards_issued: totalIssued.rows[0].count // Added global total count
             };
         }
         res.json(stats);
@@ -749,6 +809,26 @@ app.get('/api/admin/awards/approved', verifyToken, verifyAdmin, async (req, res)
     res.json(r.rows);
 });
 
+// 系统管理员：获取已颁发奖状列表 (New)
+app.get('/api/admin/issued-awards', verifyToken, verifyAdmin, async (req, res) => {
+    const r = await dbPool.query(`
+        SELECT ua.id, ua.serial_number, ua.issued_at, ua.level, 
+               u.callsign as applicant_call, 
+               a.name as award_name, a.tracking_id
+        FROM user_awards ua
+        JOIN users u ON ua.user_id = u.id
+        JOIN awards a ON ua.award_id = a.id
+        ORDER BY ua.issued_at DESC
+    `);
+    res.json(r.rows);
+});
+
+// 系统管理员：删除/撤销已颁发的奖状 (New)
+app.delete('/api/admin/issued-awards/:id', verifyToken, verifyAdmin, async (req, res) => {
+    await dbPool.query('DELETE FROM user_awards WHERE id=$1', [req.params.id]);
+    res.json({ success: true });
+});
+
 // 系统管理员：审核操作 (通过/打回/撤回)
 app.post('/api/admin/awards/audit', verifyToken, verifyAdmin, async (req, res) => {
     const { id, action, reason } = req.body; // action: 'approve', 'reject', 'recall'
@@ -876,7 +956,8 @@ app.post('/api/awards/upload-bg', verifyToken, verifyAwardAdmin, upload.single('
 
 app.get('/api/awards/:id/check', verifyToken, async (req, res) => {
     try {
-        const result = await evaluateAward(req.user.id, req.params.id);
+        const includeQsos = req.query.include_qsos === 'true';
+        const result = await evaluateAward(req.user.id, req.params.id, includeQsos);
         res.json(result);
     } catch (e) {
         console.error(e);
@@ -916,14 +997,102 @@ app.post('/api/awards/:id/apply', verifyToken, async (req, res) => {
 
 app.get('/api/user/my-awards', verifyToken, async (req, res) => {
     // Join user_awards with awards to get details
+    // Added a.rules to fetch badge colors
     const result = await dbPool.query(`
-        SELECT ua.*, a.name, a.bg_url, a.description, a.tracking_id 
+        SELECT ua.*, a.name, a.bg_url, a.description, a.tracking_id, a.rules
         FROM user_awards ua
         JOIN awards a ON ua.award_id = a.id
         WHERE ua.user_id = $1
         ORDER BY ua.issued_at DESC
     `, [req.user.id]);
     res.json(result.rows);
+});
+
+// API for User Logbook (View All) - Verified Logic
+app.get('/api/user/qsos', verifyToken, async (req, res) => {
+    try {
+        const limit = 1000; // Hard limit for now
+        // Explicitly selecting columns to match frontend expectations
+        const r = await dbPool.query('SELECT id, callsign, band, mode, qso_date, country, state, adif_raw FROM qsos WHERE user_id=$1 ORDER BY qso_date DESC, id DESC LIMIT $2', [req.user.id, limit]);
+        res.json(r.rows);
+    } catch(e) {
+        res.status(500).json({error: e.message});
+    }
+});
+
+// API to find participating awards for a specific QSO
+app.get('/api/qsos/:id/awards', verifyToken, async (req, res) => {
+    const client = await dbPool.connect();
+    try {
+        // Get the QSO
+        const qsoRes = await client.query('SELECT * FROM qsos WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+        if(qsoRes.rows.length === 0) return res.status(404).json({error: "QSO not found"});
+        const qso = qsoRes.rows[0];
+
+        // Get all approved awards
+        const awardsRes = await client.query("SELECT id, name, rules FROM awards WHERE status='approved'");
+        const matchingAwards = [];
+
+        // Check each award
+        // Note: This duplicates the filter logic from evaluateAward. 
+        // To save tokens/complexity here, I will implement a quick checker that mimics evaluateAward's Step 1 & 2.
+        
+        for (const award of awardsRes.rows) {
+            const rules = award.rules;
+            // Skip legacy
+            if (Array.isArray(rules) && !rules.v2) continue;
+
+            // 1. Basic Filter Check
+            let match = true;
+            const raw = qso.adif_raw;
+            
+            if (rules.basic?.startDate) {
+                const qDate = raw.qso_date || qso.qso_date;
+                const qDateFormatted = qDate.length === 8 ? `${qDate.slice(0,4)}-${qDate.slice(4,6)}-${qDate.slice(6,8)}` : qDate;
+                if (qDateFormatted < rules.basic.startDate) match = false;
+            }
+            if (match && rules.basic?.endDate) {
+                const qDate = raw.qso_date || qso.qso_date;
+                const qDateFormatted = qDate.length === 8 ? `${qDate.slice(0,4)}-${qDate.slice(4,6)}-${qDate.slice(6,8)}` : qDate;
+                if (qDateFormatted > rules.basic.endDate) match = false;
+            }
+            if (match && rules.basic?.qslRequired) {
+                const qslR = raw.qsl_rcvd?.toUpperCase() === 'Y';
+                const lotwR = raw.lotw_qsl_rcvd?.toUpperCase() === 'Y';
+                if (!qslR && !lotwR) match = false;
+            }
+            if (match && rules.filters) {
+                for (const f of rules.filters) {
+                    if (!f.field || !f.value || f.value === 'ANY') continue;
+                    const val = (raw[f.field.toLowerCase()] || qso[f.field.toLowerCase()] || '').toString().toUpperCase();
+                    const targetVal = f.value.toUpperCase();
+                    if (f.operator === 'eq' && val !== targetVal) match = false;
+                    if (f.operator === 'neq' && val === targetVal) match = false;
+                    if (f.operator === 'contains' && !val.includes(targetVal)) match = false;
+                }
+            }
+
+            // 2. Target Check
+            if (match && rules.targets?.list) {
+                const targetList = rules.targets.list.split(',').map(s=>s.trim().toUpperCase());
+                const targetType = rules.targets.type;
+                let val = null;
+                if (targetType === 'callsign') val = (qso.callsign || raw.call).toUpperCase();
+                else if (targetType === 'dxcc') val = (qso.dxcc || raw.dxcc);
+                else if (targetType === 'grid') val = (raw.gridsquare || '').substring(0,4).toUpperCase();
+                else if (targetType === 'iota') val = (raw.iota || '').toUpperCase();
+                else if (targetType === 'state') val = (raw.state || '').toUpperCase();
+                
+                if (val && !targetList.includes(val)) match = false;
+            }
+
+            if (match) matchingAwards.push({ id: award.id, name: award.name });
+        }
+
+        res.json(matchingAwards);
+    } finally {
+        client.release();
+    }
 });
 
 

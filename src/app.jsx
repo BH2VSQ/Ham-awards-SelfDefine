@@ -9,7 +9,7 @@ import {
   Layout, Eye, Play, CornerDownRight, BarChart, Plus,
   Search, ShieldCheck, UserPlus, Info, ExternalLink, Image as ImageIcon,
   Users, Activity, Radio, FileText, HardDrive, Clock, FileWarning,
-  Target, Calculator, Filter, Layers, Trophy // Added Icons for new designer
+  Target, Calculator, Filter, Layers, Trophy, Crop, ZoomIn, ZoomOut, Grid, ChevronDown, Bell
 } from 'lucide-react';
 
 // ================= API Utils =================
@@ -46,6 +46,17 @@ const apiFetch = async (endpoint, options = {}) => {
   const data = await res.json();
   if (!res.ok) throw { status: res.status, ...data };
   return data;
+};
+
+// ================= Helper Utils =================
+// Determine text color (black/white) based on hex background
+const getContrastColor = (hexColor) => {
+    if (!hexColor) return '#000000';
+    const r = parseInt(hexColor.substr(1, 2), 16);
+    const g = parseInt(hexColor.substr(3, 2), 16);
+    const b = parseInt(hexColor.substr(5, 2), 16);
+    const yiq = ((r * 299) + (g * 587) + (b * 114)) / 1000;
+    return (yiq >= 128) ? '#000000' : '#ffffff';
 };
 
 // ================= Components =================
@@ -268,7 +279,7 @@ const DashboardView = ({ user }) => {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <StatCard title="已发布奖状" value={stats.awards_approved} icon={Award} color="bg-green-100 text-green-700" />
                             <StatCard title="待审核奖状" value={stats.awards_pending} icon={AlertCircle} color="bg-orange-100 text-orange-700" sub="需立即处理" />
-                            <StatCard title="已颁发奖状总次" value={stats.awards_issued || 0} icon={CheckCircle} color="bg-yellow-100 text-yellow-700" />
+                            <StatCard title="已颁发奖状总次" value={stats.awards_issued || 0} icon={Trophy} color="bg-yellow-100 text-yellow-700" />
                         </div>
                     </div>
                 </div>
@@ -277,10 +288,153 @@ const DashboardView = ({ user }) => {
     );
 };
 
-// New: My Awards View (Visual Gallery)
+// Log Matrix Component (Updated for dynamic columns based on deduplication)
+const LogMatchMatrix = ({ qsos, award, checkResult }) => {
+    // 2. 包含特定判定项收集的奖项，日志比对详情显示参考附件中图片所示
+    const rules = award.rules || {};
+    const hasSpecificTargets = rules.targets?.type && ['callsign', 'dxcc', 'grid', 'iota', 'state'].includes(rules.targets.type) && rules.targets.list;
+
+    // View 1: Specific Target List View (The new requirement)
+    if (hasSpecificTargets && checkResult?.breakdown) {
+        const { breakdown } = checkResult;
+        
+        // We need to know the LABEL of the target type
+        const targetLabel = rules.targets.type.toUpperCase();
+        
+        const missingItems = breakdown.missing.map(m => ({ target: m, qso: null }));
+        
+        // Merge
+        const allItems = [...breakdown.achieved, ...missingItems];
+        // Sort by target name
+        allItems.sort((a,b) => a.target.localeCompare(b.target));
+
+        return (
+            <div className="overflow-auto border rounded-xl shadow-sm max-h-[60vh] relative">
+                <table className="w-full text-sm border-collapse">
+                    <thead className="sticky top-0 z-20 shadow-sm">
+                        <tr className="bg-slate-100 text-slate-600 font-bold border-b-2 border-slate-200">
+                            <th className="p-3 text-left w-1/3 border-r bg-slate-100">{targetLabel}</th>
+                            <th className="p-3 text-left bg-slate-100">Confirmed QSO</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {allItems.map((item, idx) => {
+                            const isAchieved = !!item.qso;
+                            return (
+                                <tr key={idx} className={`border-b ${isAchieved ? 'bg-green-50' : 'bg-red-50'}`}>
+                                    <td className={`p-3 font-mono font-bold border-r ${isAchieved ? 'text-green-800' : 'text-red-800'}`}>
+                                        {item.target}
+                                    </td>
+                                    <td className="p-3">
+                                        {isAchieved ? (
+                                            <div className="text-blue-600 font-bold underline cursor-pointer hover:text-blue-800">
+                                                {item.qso.call} <span className="text-xs text-slate-500 no-underline font-normal ml-2">({item.qso.band} / {item.qso.mode})</span>
+                                            </div>
+                                        ) : (
+                                            <span className="text-red-400 italic">Not Confirmed</span>
+                                        )}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+        );
+    }
+
+    // View 2: Standard Band/Mode Matrix (Fallback for general awards)
+    // 6. 用户的奖项日志匹配详情的波段模式表头按照波长顺序排列，从左到右从长到短
+    if (!qsos || qsos.length === 0) return <div className="p-4 text-center text-slate-400">暂无匹配日志</div>;
+
+    // Define Wavelength Sort Order
+    const bandOrder = ['160M', '80M', '60M', '40M', '30M', '20M', '17M', '15M', '12M', '10M', '6M', '4M', '2M', '70CM', '23CM'];
+    const getBandIndex = (b) => {
+        const idx = bandOrder.indexOf(b?.toUpperCase());
+        return idx === -1 ? 999 : idx;
+    };
+
+    const bands = Array.from(new Set(qsos.map(q => q.band))).sort((a,b) => getBandIndex(a) - getBandIndex(b));
+    
+    // Row Logic
+    let getRowKey = (q) => q.call; // Default
+    let rowLabel = "Callsign";
+    
+    // Even if not "Specific Targets List", we might group by Entity if logic implies
+    if (rules.targets?.type === 'dxcc') { getRowKey = (q) => q.dxcc || q.country; rowLabel = "DXCC"; }
+    else if (rules.targets?.type === 'grid') { getRowKey = (q) => (q.grid || '').substring(0,4); rowLabel = "Grid"; }
+    else if (rules.targets?.type === 'state') { getRowKey = (q) => q.state; rowLabel = "State"; }
+    
+    const rowKeys = Array.from(new Set(qsos.map(q => getRowKey(q)))).sort();
+    const modes = ['CW', 'PHONE', 'DIGI'];
+
+    const getModeCat = (m) => {
+        if (!m) return 'DIGI';
+        m = m.toUpperCase();
+        if (['CW'].includes(m)) return 'CW';
+        if (['SSB', 'AM', 'FM', 'USB', 'LSB'].includes(m)) return 'PHONE';
+        return 'DIGI';
+    };
+
+    // Build Map: RowKey -> Band -> Mode -> Count
+    const dataMap = {};
+    qsos.forEach(q => {
+        const rKey = getRowKey(q);
+        if (!rKey) return;
+        if (!dataMap[rKey]) dataMap[rKey] = {};
+        if (!dataMap[rKey][q.band]) dataMap[rKey][q.band] = { CW:0, PHONE:0, DIGI:0 };
+        dataMap[rKey][q.band][getModeCat(q.mode)]++;
+    });
+
+    return (
+        <div className="overflow-auto border rounded-xl shadow-sm max-h-[60vh] relative">
+            <table className="w-full text-xs text-center border-collapse">
+                <thead className="sticky top-0 z-20 bg-slate-100 shadow-sm">
+                    <tr className="bg-slate-100 text-slate-600">
+                        <th rowSpan="2" className="p-2 border sticky left-0 top-0 z-30 bg-slate-100 w-24 text-left shadow-r">{rowLabel}</th>
+                        {bands.map(b => (
+                            <th key={b} colSpan="3" className="p-2 border font-bold bg-slate-50">{b}</th>
+                        ))}
+                    </tr>
+                    <tr className="bg-slate-50 text-slate-500 text-[10px]">
+                        {bands.map(b => (
+                            <React.Fragment key={b}>
+                                <th className="border p-1 w-8">CW</th>
+                                <th className="border p-1 w-8">SSB</th>
+                                <th className="border p-1 w-8">DIGI</th>
+                            </React.Fragment>
+                        ))}
+                    </tr>
+                </thead>
+                <tbody className="bg-white">
+                    {rowKeys.map(rKey => (
+                        <tr key={rKey} className="hover:bg-blue-50">
+                            <td className="p-2 border font-mono font-bold sticky left-0 bg-white hover:bg-blue-50 z-10 text-left border-r shadow-sm">{rKey}</td>
+                            {bands.map(b => (
+                                <React.Fragment key={b}>
+                                    {modes.map(m => {
+                                        const count = dataMap[rKey]?.[b]?.[m] || 0;
+                                        return (
+                                            <td key={m} className={`border p-1 ${count > 0 ? 'bg-green-100 text-green-700 font-bold' : 'text-slate-200'}`}>
+                                                {count > 0 ? count : '-'}
+                                            </td>
+                                        );
+                                    })}
+                                </React.Fragment>
+                            ))}
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
+};
+
+// New: My Awards View (Visual Gallery with Colored Badges)
 const MyAwardsView = ({ user }) => {
     const [awards, setAwards] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [selectedAward, setSelectedAward] = useState(null); // For detail view
 
     useEffect(() => {
         apiFetch('/user/my-awards')
@@ -299,57 +453,83 @@ const MyAwardsView = ({ user }) => {
         </div>
     );
 
+    const getLevelColor = (ua) => {
+        // Try to find the color definition in rules
+        if (ua.rules && ua.rules.thresholds) {
+            const t = ua.rules.thresholds.find(th => th.name === ua.level);
+            if (t && t.color) return t.color;
+        }
+        return '#eab308'; // Default yellow-500
+    };
+
     return (
         <div className="space-y-6">
             <h3 className="text-xl font-bold flex items-center gap-2"><Award className="text-orange-500"/> 我的荣誉墙 (My Awards)</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-8">
-                {awards.map(ua => (
-                    <div key={ua.id} className="relative group perspective">
-                        {/* Certificate Card */}
-                        <div className="bg-white rounded-xl shadow-xl overflow-hidden border-4 border-slate-900 aspect-[1.414/1] relative">
-                             {/* Background */}
-                             <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: `url(${ua.bg_url})`}}></div>
-                             <div className="absolute inset-0 bg-black/10"></div>
-                             
-                             {/* Overlay Info */}
-                             <div className="absolute inset-0 p-8 flex flex-col justify-between text-white drop-shadow-md">
-                                 <div className="flex justify-between items-start">
-                                     <div className="bg-black/40 backdrop-blur px-3 py-1 rounded text-xs font-mono tracking-widest border border-white/20">
-                                         NO. {ua.serial_number}
-                                     </div>
-                                     {ua.level && (
-                                         <div className="bg-yellow-500 text-black px-4 py-1 rounded-full font-black uppercase text-sm shadow-lg">
-                                             {ua.level} LEVEL
+                {awards.map(ua => {
+                    const badgeColor = getLevelColor(ua);
+                    const textColor = getContrastColor(badgeColor);
+                    return (
+                        <div key={ua.id} className="relative group perspective cursor-pointer" onClick={() => setSelectedAward(ua)}>
+                            {/* Certificate Card */}
+                            <div className="bg-white rounded-xl shadow-xl overflow-hidden border-4 border-slate-900 aspect-[1.414/1] relative">
+                                 {/* Background */}
+                                 <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: `url(${ua.bg_url})`}}></div>
+                                 <div className="absolute inset-0 bg-black/10"></div>
+                                 
+                                 {/* Overlay Info */}
+                                 <div className="absolute inset-0 p-8 flex flex-col justify-between text-white drop-shadow-md">
+                                     <div className="flex justify-between items-start">
+                                         <div className="bg-black/40 backdrop-blur px-3 py-1 rounded text-xs font-mono tracking-widest border border-white/20">
+                                             NO. {ua.serial_number}
                                          </div>
-                                     )}
+                                         {ua.level && (
+                                             <div 
+                                                className="px-4 py-1 rounded-full font-black uppercase text-sm shadow-lg"
+                                                style={{ backgroundColor: badgeColor, color: textColor }}
+                                             >
+                                                 {ua.level} LEVEL
+                                             </div>
+                                         )}
+                                     </div>
+                                     <div className="text-center">
+                                         <h2 className="text-3xl font-black uppercase tracking-wider mb-2" style={{textShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>{ua.name}</h2>
+                                         <div className="text-lg font-serif italic">Presented to {user.callsign}</div>
+                                     </div>
+                                     <div className="flex justify-between items-end text-xs opacity-80">
+                                         <div>{new Date(ua.issued_at).toLocaleDateString()}</div>
+                                         <div className="font-mono">{ua.tracking_id}</div>
+                                     </div>
                                  </div>
-                                 <div className="text-center">
-                                     <h2 className="text-3xl font-black uppercase tracking-wider mb-2" style={{textShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>{ua.name}</h2>
-                                     <div className="text-lg font-serif italic">Presented to {user.callsign}</div>
-                                 </div>
-                                 <div className="flex justify-between items-end text-xs opacity-80">
-                                     <div>{new Date(ua.issued_at).toLocaleDateString()}</div>
-                                     <div className="font-mono">{ua.tracking_id}</div>
-                                 </div>
-                             </div>
+                            </div>
+                            
+                            {/* Action Bar */}
+                            <div className="mt-4 flex justify-between items-center px-2">
+                                 <div className="text-sm font-bold text-slate-600 flex items-center gap-2"><Eye size={14}/> {ua.name}</div>
+                            </div>
                         </div>
-                        
-                        {/* Action Bar */}
-                        <div className="mt-4 flex justify-between items-center px-2">
-                             <div className="text-sm font-bold text-slate-600">{ua.name}</div>
-                        </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
+            {/* Pass userRole as admin to hide 'apply' button but allow matrix viewing */}
+            {selectedAward && (
+                <AwardDetailModal 
+                    award={{...selectedAward, id: selectedAward.award_id}} 
+                    onClose={() => setSelectedAward(null)} 
+                    userRole="user" 
+                    mode="view_only" // Signal to just show progress/matrix
+                />
+            )}
         </div>
     );
 };
 
 // Common Award Detail Modal (UPDATED: Multi-level)
-const AwardDetailModal = ({ award, onClose, onApply, userRole }) => {
+const AwardDetailModal = ({ award, onClose, onApply, userRole, mode }) => {
     const [checkResult, setCheckResult] = useState(null);
     const [checking, setChecking] = useState(false);
     const [applying, setApplying] = useState(false);
+    const [showMatrix, setShowMatrix] = useState(false);
 
     useEffect(() => {
         if (userRole === 'user') {
@@ -357,10 +537,13 @@ const AwardDetailModal = ({ award, onClose, onApply, userRole }) => {
         }
     }, []);
 
-    const checkEligibility = async () => {
+    const checkEligibility = async (includeQsos = false) => {
         setChecking(true);
         try {
-            const res = await apiFetch(`/awards/${award.id}/check`);
+            // mode='view_only' implies we might want to see the matrix immediately or just load progress
+            // Check requires ?include_qsos=true for matrix
+            const url = `/awards/${award.id}/check` + (includeQsos || showMatrix ? '?include_qsos=true' : '');
+            const res = await apiFetch(url);
             setCheckResult(res);
         } catch (err) {
             console.error(err);
@@ -384,13 +567,18 @@ const AwardDetailModal = ({ award, onClose, onApply, userRole }) => {
         }
     };
 
+    const handleLoadMatrix = () => {
+        setShowMatrix(true);
+        checkEligibility(true); // reload with qsos
+    };
+
     const rules = award.rules || {};
     const hasComplexRules = !!rules.v2;
 
     return (
         <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-5xl rounded-2xl overflow-hidden shadow-2xl flex flex-col md:flex-row h-[90vh]">
-                <div className="w-full md:w-5/12 bg-slate-100 bg-cover bg-center h-48 md:h-auto min-h-[200px] flex flex-col justify-end p-6" style={{backgroundImage: `url(${award.bg_url})`}}>
+            <div className="bg-white w-full max-w-6xl rounded-2xl overflow-hidden shadow-2xl flex flex-col md:flex-row h-[90vh]">
+                <div className="w-full md:w-4/12 bg-slate-100 bg-cover bg-center h-48 md:h-auto min-h-[200px] flex flex-col justify-end p-6" style={{backgroundImage: `url(${award.bg_url})`}}>
                     <div className="bg-black/50 backdrop-blur-sm p-4 rounded-xl text-white">
                         <div className="text-xs font-bold opacity-70 uppercase tracking-wider mb-1">奖状详情</div>
                         <h2 className="text-2xl font-black leading-tight">{award.name}</h2>
@@ -406,126 +594,185 @@ const AwardDetailModal = ({ award, onClose, onApply, userRole }) => {
                         <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full"><X/></button>
                     </div>
                     
-                    <div className="space-y-6 flex-1">
-                        <div>
-                            <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Info size={14}/> 简介</h4>
-                            <p className="text-slate-700 leading-relaxed text-sm bg-slate-50 p-4 rounded-xl border">{award.description || '暂无描述'}</p>
-                        </div>
-
-                        {/* Conditions Display */}
-                        <div>
-                            <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Filter size={14}/> 判定条件</h4>
-                            <div className="bg-slate-50 rounded-xl p-4 border text-sm space-y-2">
-                                {hasComplexRules ? (
-                                    <>
-                                        {rules.basic?.startDate && <div>📅 时间范围: {rules.basic.startDate} 至 {rules.basic.endDate || '至今'}</div>}
-                                        {rules.basic?.qslRequired && <div className="text-green-600 font-bold">✅ 需要 QSL 确认</div>}
-                                        {rules.filters?.length > 0 ? (
-                                            rules.filters.map((f, i) => (
-                                                <div key={i} className="flex gap-2"><span className="font-mono bg-white px-1 border rounded text-xs">{f.field}</span> {f.operator} <b>{f.value}</b></div>
-                                            ))
-                                        ) : <div className="text-slate-400 text-xs">无特殊筛选条件</div>}
-                                    </>
+                    {showMatrix ? (
+                        <div className="flex-1 overflow-hidden flex flex-col">
+                            <div className="flex items-center gap-2 mb-4">
+                                <button onClick={()=>setShowMatrix(false)} className="text-sm text-slate-500 hover:text-black">← 返回详情</button>
+                                <h4 className="font-bold">日志匹配分析 (Log Matrix)</h4>
+                            </div>
+                            <div className="flex-1 overflow-hidden relative">
+                                {checkResult?.matching_qsos ? (
+                                    <LogMatchMatrix qsos={checkResult.matching_qsos} award={award} checkResult={checkResult} />
                                 ) : (
-                                    (Array.isArray(award.rules) ? award.rules : []).map((rule, i) => (
-                                        <div key={i} className="flex items-center gap-2">
-                                            <CheckCircle size={14} className="text-green-500"/>
-                                            <span><span className="font-mono bg-white px-1 border rounded">{rule.field}</span> {rule.operator} <span className="font-bold">{rule.value}</span></span>
-                                        </div>
-                                    ))
+                                    <div className="text-center p-8 text-slate-400">加载中...</div>
                                 )}
                             </div>
                         </div>
+                    ) : (
+                        <div className="space-y-6 flex-1 overflow-y-auto">
+                            <div>
+                                <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Info size={14}/> 简介</h4>
+                                <p className="text-slate-700 leading-relaxed text-sm bg-slate-50 p-4 rounded-xl border">{award.description || '暂无描述'}</p>
+                            </div>
 
-                        {/* Logic & Targets */}
-                        {hasComplexRules && (
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Calculator size={14}/> 计分模式</h4>
-                                    <div className="bg-slate-50 p-3 rounded-lg border text-sm">
-                                        <div className="font-bold text-slate-700 mb-1">{rules.logic === 'collection' ? '📦 收集型 (计数)' : '🔢 计分型 (累计)'}</div>
-                                        <div className="text-xs text-slate-500">目标: {rules.targets?.type?.toUpperCase() || '任意 QSO'}</div>
-                                    </div>
-                                </div>
-                                <div>
-                                    <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Trophy size={14}/> 等级要求</h4>
-                                    <div className="bg-slate-50 p-3 rounded-lg border text-sm space-y-1">
-                                        {(rules.thresholds || [{value:0, name:'Basic'}]).map((t,i) => (
-                                            <div key={i} className="flex justify-between text-xs">
-                                                <span>{t.name}</span>
-                                                <span className="font-bold">{t.value}</span>
+                            {/* Conditions Display */}
+                            <div>
+                                <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Filter size={14}/> 判定条件</h4>
+                                <div className="bg-slate-50 rounded-xl p-4 border text-sm space-y-2">
+                                    {hasComplexRules ? (
+                                        <>
+                                            {rules.basic?.startDate && <div>📅 时间范围: {rules.basic.startDate} 至 {rules.basic.endDate || '至今'}</div>}
+                                            {rules.basic?.qslRequired && <div className="text-green-600 font-bold">✅ 需要 QSL 确认</div>}
+                                            {rules.filters?.length > 0 ? (
+                                                rules.filters.map((f, i) => (
+                                                    <div key={i} className="flex gap-2"><span className="font-mono bg-white px-1 border rounded text-xs">{f.field}</span> {f.operator} <b>{f.value}</b></div>
+                                                ))
+                                            ) : <div className="text-slate-400 text-xs">无特殊筛选条件</div>}
+                                        </>
+                                    ) : (
+                                        (Array.isArray(award.rules) ? award.rules : []).map((rule, i) => (
+                                            <div key={i} className="flex items-center gap-2">
+                                                <CheckCircle size={14} className="text-green-500"/>
+                                                <span><span className="font-mono bg-white px-1 border rounded">{rule.field}</span> {rule.operator} <span className="font-bold">{rule.value}</span></span>
                                             </div>
-                                        ))}
-                                    </div>
+                                        ))
+                                    )}
                                 </div>
                             </div>
-                        )}
 
-                        {/* Real-time Check Result Area */}
-                        {userRole === 'user' && (
-                            <div className="mt-4 pt-4 border-t">
-                                <h4 className="font-bold text-sm text-slate-500 mb-3 uppercase flex items-center gap-2">
-                                    <Activity size={14}/> 您的进度
-                                    {checking && <span className="text-xs font-normal text-blue-600 animate-pulse ml-2">正在分析日志...</span>}
-                                </h4>
-                                
-                                {checkResult ? (
-                                    <div className={`rounded-xl p-5 border-2 ${checkResult.eligible ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-200'}`}>
-                                        <div className="flex justify-between items-center mb-2">
-                                            <span className="text-sm font-bold text-slate-500">当前累计</span>
-                                            <span className="text-2xl font-black">{checkResult.current_score} <span className="text-sm text-slate-400 font-normal">/ {checkResult.target_score}</span></span>
+                            {/* Logic & Targets */}
+                            {hasComplexRules && (
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Calculator size={14}/> 计分模式</h4>
+                                        <div className="bg-slate-50 p-3 rounded-lg border text-sm">
+                                            <div className="font-bold text-slate-700 mb-1">{rules.logic === 'collection' ? '📦 收集型 (计数)' : '🔢 计分型 (累计)'}</div>
+                                            <div className="text-xs text-slate-500">目标: {rules.targets?.type?.toUpperCase() || '任意 QSO'}</div>
                                         </div>
-                                        {/* Progress Bar */}
-                                        <div className="w-full bg-slate-200 rounded-full h-3 mb-3 overflow-hidden">
-                                            <div 
-                                                className={`h-full transition-all duration-1000 ${checkResult.eligible ? 'bg-green-500' : 'bg-blue-500'}`} 
-                                                style={{width: `${Math.min(100, (checkResult.current_score / checkResult.target_score) * 100)}%`}}
-                                            ></div>
-                                        </div>
-                                        <div className="flex justify-between items-center">
-                                            <div className="text-xs text-slate-500 font-bold">
-                                                {checkResult.details?.msg}
-                                            </div>
-                                            {checkResult.eligible && <div className="px-2 py-1 bg-green-200 text-green-800 text-xs font-bold rounded flex items-center gap-1"><Check size={12}/> 已达成: {checkResult.achieved_level?.name}</div>}
-                                        </div>
-                                        {/* Multi-level Claim Info */}
-                                        {checkResult.claimed_levels?.length > 0 && (
-                                            <div className="mt-2 text-xs text-slate-400">
-                                                已领取: {checkResult.claimed_levels.join(', ')}
-                                            </div>
-                                        )}
                                     </div>
-                                ) : (
-                                    <div className="text-center py-6 text-slate-400 text-sm bg-slate-50 rounded-xl border border-dashed">
-                                        日志分析未就绪或出现错误
+                                    <div>
+                                        <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Trophy size={14}/> 等级要求</h4>
+                                        <div className="bg-slate-50 p-3 rounded-lg border text-sm space-y-1">
+                                            {(rules.thresholds || [{value:0, name:'Basic'}]).map((t,i) => (
+                                                <div key={i} className="flex justify-between text-xs">
+                                                    <span>{t.name}</span>
+                                                    <span className="font-bold">
+                                                        {t.value} {t.fullCollection ? '+ Full' : ''}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
-                                )}
-                            </div>
-                        )}
-                    </div>
+                                </div>
+                            )}
+
+                            {/* Real-time Check Result Area */}
+                            {userRole === 'user' && (
+                                <div className="mt-4 pt-4 border-t">
+                                    <div className="flex justify-between items-center mb-3">
+                                        <h4 className="font-bold text-sm text-slate-500 uppercase flex items-center gap-2">
+                                            <Activity size={14}/> 您的进度
+                                            {checking && <span className="text-xs font-normal text-blue-600 animate-pulse ml-2">正在分析日志...</span>}
+                                        </h4>
+                                        <button onClick={handleLoadMatrix} className="text-xs bg-blue-50 text-blue-600 px-3 py-1 rounded-full font-bold hover:bg-blue-100 flex items-center gap-1">
+                                            <Grid size={12}/> 查看日志匹配详情
+                                        </button>
+                                    </div>
+                                    
+                                    {checkResult ? (
+                                        <div className={`rounded-xl p-5 border-2 space-y-4 ${checkResult.eligible ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-200'}`}>
+                                            <div>
+                                                <div className="flex justify-between items-center mb-2">
+                                                    <span className="text-sm font-bold text-slate-500">当前累计</span>
+                                                    <span className="text-2xl font-black">{checkResult.current_score} <span className="text-sm text-slate-400 font-normal">/ {checkResult.target_score}</span></span>
+                                                </div>
+                                                {/* Progress Bar */}
+                                                <div className="w-full bg-slate-200 rounded-full h-3 mb-3 overflow-hidden">
+                                                    <div 
+                                                        className={`h-full transition-all duration-1000 ${checkResult.eligible ? 'bg-green-500' : 'bg-blue-500'}`} 
+                                                        style={{width: `${Math.min(100, (checkResult.current_score / checkResult.target_score) * 100)}%`}}
+                                                    ></div>
+                                                </div>
+                                                <div className="flex justify-between items-center">
+                                                    <div className="text-xs text-slate-500 font-bold">
+                                                        {checkResult.details?.msg}
+                                                    </div>
+                                                    {checkResult.eligible && <div className="px-2 py-1 bg-green-200 text-green-800 text-xs font-bold rounded flex items-center gap-1"><Check size={12}/> 已达成: {checkResult.achieved_level?.name}</div>}
+                                                </div>
+                                            </div>
+
+                                            {/* Detailed Target Breakdown */}
+                                            {checkResult.breakdown && (
+                                                <div className="bg-white rounded-lg p-3 border text-xs">
+                                                    <div className="font-bold mb-2 flex justify-between">
+                                                        <span>特定目标完成度 ({checkResult.breakdown.achieved.length}/{checkResult.breakdown.total_required})</span>
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto">
+                                                        <div>
+                                                            <div className="text-green-600 font-bold mb-1">已完成</div>
+                                                            <div className="flex flex-wrap gap-1">
+                                                                {checkResult.breakdown.achieved.map(t => (
+                                                                    <span key={t.target} className="bg-green-100 text-green-700 px-1 rounded">{t.target}</span>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        <div>
+                                                            <div className="text-red-400 font-bold mb-1">未完成</div>
+                                                            <div className="flex flex-wrap gap-1">
+                                                                {checkResult.breakdown.missing.map(t => (
+                                                                    <span key={t} className="bg-slate-100 text-slate-400 px-1 rounded">{t}</span>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Multi-level Claim Info */}
+                                            {checkResult.claimed_levels?.length > 0 && (
+                                                <div className="mt-2 text-xs text-slate-400 border-t pt-2">
+                                                    已领取: {checkResult.claimed_levels.join(', ')}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <div className="text-center py-6 text-slate-400 text-sm bg-slate-50 rounded-xl border border-dashed">
+                                            日志分析未就绪或出现错误
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     <div className="mt-6">
-                        {userRole === 'user' ? (
-                            <button 
-                                onClick={handleApplyClick} 
-                                disabled={!checkResult?.eligible || applying || checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name)}
-                                className={`w-full py-4 rounded-xl font-bold shadow-lg transition-all flex items-center justify-center gap-2 ${
-                                    checkResult?.eligible && !checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name)
-                                    ? 'bg-green-600 hover:bg-green-700 text-white shadow-green-200 active:scale-95' 
-                                    : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
-                                }`}
-                            >
-                                {applying ? '正在提交...' 
-                                    : checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name) 
-                                        ? `已领取当前等级 (${checkResult.achieved_level.name})`
-                                        : checkResult?.eligible 
-                                            ? `申领 ${checkResult.achieved_level.name} 奖状` 
-                                            : '条件未满足，无法申领'}
-                            </button>
+                        {mode === 'view_only' ? (
+                            <div className="text-center text-slate-400 text-sm bg-slate-50 p-3 rounded-lg border">
+                                已颁发奖状查看模式
+                            </div>
                         ) : (
-                             <div className="text-center text-slate-400 text-sm bg-slate-50 p-3 rounded-lg border">
-                                 {userRole === 'admin' ? '管理员模式 - 仅供预览' : '仅普通用户可申领'}
-                             </div>
+                            userRole === 'user' ? (
+                                <button 
+                                    onClick={handleApplyClick} 
+                                    disabled={!checkResult?.eligible || applying || checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name)}
+                                    className={`w-full py-4 rounded-xl font-bold shadow-lg transition-all flex items-center justify-center gap-2 ${
+                                        checkResult?.eligible && !checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name)
+                                        ? 'bg-green-600 hover:bg-green-700 text-white shadow-green-200 active:scale-95' 
+                                        : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
+                                    }`}
+                                >
+                                    {applying ? '正在提交...' 
+                                        : checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name) 
+                                            ? `已领取当前等级 (${checkResult.achieved_level.name})`
+                                            : checkResult?.eligible 
+                                                ? `申领 ${checkResult.achieved_level.name} 奖状` 
+                                                : '条件未满足，无法申领'}
+                                </button>
+                            ) : (
+                                <div className="text-center text-slate-400 text-sm bg-slate-50 p-3 rounded-lg border">
+                                    {userRole === 'admin' ? '管理员模式 - 仅供预览' : '仅普通用户可申领'}
+                                </div>
+                            )
                         )}
                     </div>
                 </div>
@@ -581,19 +828,39 @@ const AwardCenterView = ({ user }) => {
 
 // 2. Award Admin Manager (Refactored: Split Create, Drafts, Audit, Returned)
 const AwardAdminManager = () => {
-    const [tab, setTab] = useState('create'); // create, drafts, returned, audit_list
+    const [tab, setTab] = useState('create'); // create, drafts_dropdown, audit_list
+    const [draftSubTab, setDraftSubTab] = useState('my_drafts'); // my_drafts, returned
+    
     const [drafts, setDrafts] = useState([]);
     const [auditList, setAuditList] = useState([]);
     const [editingAward, setEditingAward] = useState(null); 
     const [timelineModal, setTimelineModal] = useState(null); 
+    
+    // Notifications logic
+    const [unreadReturned, setUnreadReturned] = useState(false);
 
     const loadData = async () => {
-        if (tab === 'drafts') apiFetch('/awards/my?status=drafts').then(setDrafts);
-        if (tab === 'returned') apiFetch('/awards/my?status=returned').then(setDrafts);
+        // Load stats for red dots
+        apiFetch('/stats/dashboard').then(stats => {
+             if (stats.my_returned > 0) setUnreadReturned(true);
+        }).catch(console.error);
+
+        // Load content based on tab
+        if (tab === 'drafts_dropdown') {
+            const status = draftSubTab === 'my_drafts' ? 'drafts' : 'returned';
+            apiFetch(`/awards/my?status=${status}`).then(setDrafts);
+        }
         if (tab === 'audit_list') apiFetch('/awards/my?status=audit_list').then(setAuditList);
     };
 
-    useEffect(() => { loadData(); }, [tab]);
+    useEffect(() => { loadData(); }, [tab, draftSubTab]);
+
+    // Handle clearing notification when viewing returned drafts
+    useEffect(() => {
+        if (tab === 'drafts_dropdown' && draftSubTab === 'returned') {
+            setUnreadReturned(false);
+        }
+    }, [tab, draftSubTab]);
 
     const handleDelete = async (id) => {
         if(!confirm('确定删除此记录吗？')) return;
@@ -640,17 +907,42 @@ const AwardAdminManager = () => {
 
     return (
         <div className="space-y-6">
+            {/* Top Tabs */}
             <div className="flex bg-white p-1 rounded-xl shadow-sm border w-fit">
-                {[
-                    {id: 'create', label: '新建奖状', icon: Plus},
-                    {id: 'drafts', label: '我的草稿', icon: FileText},
-                    {id: 'returned', label: '打回草稿', icon: FileWarning},
-                    {id: 'audit_list', label: '审核列表', icon: List},
-                ].map(t => (
-                    <button key={t.id} onClick={()=>setTab(t.id)} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${tab===t.id ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>
-                        <t.icon size={16}/> {t.label}
+                {/* 1. New Award */}
+                <button onClick={()=>setTab('create')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${tab==='create' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>
+                    <Plus size={16}/> 新建奖状
+                </button>
+                
+                {/* 2. Drafts Box (Dropdown) */}
+                <div className="relative group">
+                    <button 
+                        onClick={()=>setTab('drafts_dropdown')} 
+                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all relative ${tab==='drafts_dropdown' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-50'}`}
+                    >
+                        <FileText size={16}/> 草稿箱
+                        {unreadReturned && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>}
+                        <ChevronDown size={14} className="opacity-50"/>
                     </button>
-                ))}
+                    {/* Hover dropdown (CSS driven group-hover usually, but for React logic we can just click to switch view, 
+                        and use a sub-menu inside the main view, OR implement a real dropdown. 
+                        The prompt says "Drafts is a dropdown". Let's show submenu when tab is active OR hover) 
+                    */}
+                    <div className="absolute top-full left-0 mt-2 w-40 bg-white shadow-xl rounded-lg border overflow-hidden hidden group-hover:block z-20">
+                        <button onClick={()=>{setTab('drafts_dropdown'); setDraftSubTab('my_drafts');}} className="block w-full text-left px-4 py-2 text-sm hover:bg-slate-50">
+                            我的草稿
+                        </button>
+                        <button onClick={()=>{setTab('drafts_dropdown'); setDraftSubTab('returned');}} className="block w-full text-left px-4 py-2 text-sm hover:bg-slate-50 relative">
+                            打回草稿
+                            {unreadReturned && <span className="absolute top-3 right-3 w-2 h-2 bg-red-500 rounded-full"></span>}
+                        </button>
+                    </div>
+                </div>
+
+                {/* 3. Audit List */}
+                <button onClick={()=>setTab('audit_list')} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${tab==='audit_list' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>
+                    <List size={16}/> 审核列表
+                </button>
             </div>
 
             <div className="bg-white rounded-2xl shadow-sm border p-6 min-h-[400px]">
@@ -663,26 +955,37 @@ const AwardAdminManager = () => {
                     </div>
                 )}
 
-                {(tab === 'drafts' || tab === 'returned') && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {drafts.length === 0 && <div className="col-span-full text-center text-slate-400 py-10">空空如也</div>}
-                        {drafts.map(d => (
-                            <div key={d.id} className="border rounded-xl overflow-hidden hover:border-blue-300 transition-colors group">
-                                <div className="h-32 bg-slate-100 bg-cover bg-center relative" style={{backgroundImage: `url(${d.bg_url})`}}>
-                                    {tab === 'returned' && <div className="absolute top-2 right-2 bg-red-500 text-white text-xs px-2 py-1 rounded font-bold">已退回</div>}
-                                </div>
-                                <div className="p-4">
-                                    <h4 className="font-bold mb-1">{d.name || '未命名奖状'}</h4>
-                                    {tab === 'returned' && d.reject_reason && (
-                                        <div className="text-xs text-red-600 bg-red-50 p-2 rounded mb-2">原因: {d.reject_reason}</div>
-                                    )}
-                                    <div className="flex gap-2 mt-4">
-                                        <button onClick={()=>setEditingAward(d)} className="flex-1 bg-slate-900 text-white py-2 rounded-lg text-sm font-bold">编辑/重交</button>
-                                        <button onClick={()=>handleDelete(d.id)} className="p-2 text-red-400 hover:bg-red-50 rounded-lg"><Trash2 size={16}/></button>
+                {tab === 'drafts_dropdown' && (
+                    <div>
+                        {/* Sub-tabs for better UI inside the section if dropdown is just for selection */}
+                        <div className="flex gap-4 mb-6 border-b pb-2">
+                            <button onClick={()=>setDraftSubTab('my_drafts')} className={`text-sm font-bold pb-2 border-b-2 transition-all ${draftSubTab==='my_drafts'?'border-blue-500 text-blue-600':'border-transparent text-slate-400'}`}>我的草稿</button>
+                            <button onClick={()=>setDraftSubTab('returned')} className={`text-sm font-bold pb-2 border-b-2 transition-all relative ${draftSubTab==='returned'?'border-red-500 text-red-600':'border-transparent text-slate-400'}`}>
+                                打回草稿
+                                {unreadReturned && draftSubTab !== 'returned' && <span className="absolute -top-1 -right-2 w-2 h-2 bg-red-500 rounded-full"></span>}
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                            {drafts.length === 0 && <div className="col-span-full text-center text-slate-400 py-10">空空如也</div>}
+                            {drafts.map(d => (
+                                <div key={d.id} className="border rounded-xl overflow-hidden hover:border-blue-300 transition-colors group">
+                                    <div className="h-32 bg-slate-100 bg-cover bg-center relative" style={{backgroundImage: `url(${d.bg_url})`}}>
+                                        {draftSubTab === 'returned' && <div className="absolute top-2 right-2 bg-red-500 text-white text-xs px-2 py-1 rounded font-bold">已退回</div>}
+                                    </div>
+                                    <div className="p-4">
+                                        <h4 className="font-bold mb-1">{d.name || '未命名奖状'}</h4>
+                                        {draftSubTab === 'returned' && d.reject_reason && (
+                                            <div className="text-xs text-red-600 bg-red-50 p-2 rounded mb-2">原因: {d.reject_reason}</div>
+                                        )}
+                                        <div className="flex gap-2 mt-4">
+                                            <button onClick={()=>setEditingAward(d)} className="flex-1 bg-slate-900 text-white py-2 rounded-lg text-sm font-bold">编辑/重交</button>
+                                            <button onClick={()=>handleDelete(d.id)} className="p-2 text-red-400 hover:bg-red-50 rounded-lg"><Trash2 size={16}/></button>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        ))}
+                            ))}
+                        </div>
                     </div>
                 )}
 
@@ -722,20 +1025,34 @@ const AwardAdminManager = () => {
     );
 };
 
-// 3. System Admin Award Manager (Refactored: Audit & Overview)
+// 3. System Admin Award Manager (Refactored: Split Audit & Overview into parallel tabs)
 const SystemAdminAwardManager = () => {
-    const [view, setView] = useState('audit'); // audit (pending), overview (approved)
+    // 4. 系统管理员界面中，奖状审核拆分为奖状审核和奖状总览两个并列同级标签
+    const [view, setView] = useState('audit'); // 'audit' or 'overview'
     const [list, setList] = useState([]);
-    const [actionModal, setActionModal] = useState(null); // { id, action, title }
+    const [actionModal, setActionModal] = useState(null); 
     const [reason, setReason] = useState('');
-    const [detailModal, setDetailModal] = useState(null); // For viewing details
+    const [detailModal, setDetailModal] = useState(null); 
+    
+    // Notification
+    const [unreadPending, setUnreadPending] = useState(false);
 
     const load = () => {
+        // Fetch stats for red dot
+        apiFetch('/stats/dashboard').then(stats => {
+             if (stats.awards_pending > 0) setUnreadPending(true);
+        }).catch(console.error);
+
         const url = view === 'audit' ? '/admin/awards/pending' : '/admin/awards/approved';
-        apiFetch(url).then(setList);
+        apiFetch(url).then(setList).catch(console.error);
     };
 
     useEffect(() => { load(); }, [view]);
+
+    // Handle clearing notification
+    useEffect(() => {
+        if (view === 'audit') setUnreadPending(false);
+    }, [view]);
 
     const handleAction = async () => {
         try {
@@ -750,15 +1067,18 @@ const SystemAdminAwardManager = () => {
 
     return (
         <div className="space-y-6">
-            <div className="flex gap-4 mb-4">
-                <button onClick={()=>setView('audit')} className={`px-6 py-3 rounded-xl font-bold text-lg flex items-center gap-2 ${view==='audit'?'bg-blue-600 text-white shadow-lg shadow-blue-200':'bg-white text-slate-400'}`}>
-                    <CheckCircle/> 奖状审核
+            {/* Top Tabs with Notification */}
+            <div className="flex bg-white p-1 rounded-xl shadow-sm border w-fit">
+                <button onClick={()=>setView('audit')} className={`relative flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-bold transition-all ${view==='audit'?'bg-blue-600 text-white shadow':'text-slate-500 hover:bg-slate-50'}`}>
+                    <CheckCircle size={16}/> 奖状审核
+                    {unreadPending && <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>}
                 </button>
-                <button onClick={()=>setView('overview')} className={`px-6 py-3 rounded-xl font-bold text-lg flex items-center gap-2 ${view==='overview'?'bg-purple-600 text-white shadow-lg shadow-purple-200':'bg-white text-slate-400'}`}>
-                    <Layout/> 奖状总览 (抽查)
+                <button onClick={()=>setView('overview')} className={`flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-bold transition-all ${view==='overview'?'bg-purple-600 text-white shadow':'text-slate-500 hover:bg-slate-50'}`}>
+                    <Layout size={16}/> 奖状总览
                 </button>
             </div>
 
+            {/* Content Table */}
             <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
                 <table className="w-full text-left">
                     <thead className="bg-slate-50 border-b">
@@ -778,11 +1098,11 @@ const SystemAdminAwardManager = () => {
                                     <button onClick={()=>setDetailModal(item)} className="p-2 bg-slate-100 text-slate-600 rounded hover:bg-slate-200" title="查看详情"><Eye size={16}/></button>
                                     {view === 'audit' ? (
                                         <>
-                                            <button onClick={()=>apiFetch('/admin/awards/audit', {method:'POST', body:JSON.stringify({id:item.id, action:'已通过'})}).then(()=>{alert('已通过');load()})} className="px-3 py-1 bg-green-100 text-green-700 rounded font-bold text-sm">通过</button>
-                                            <button onClick={()=>setActionModal({id:item.id, action:'打回修改', title:'打回申请'})} className="px-3 py-1 bg-red-100 text-red-700 rounded font-bold text-sm">打回</button>
+                                            <button onClick={()=>apiFetch('/admin/awards/audit', {method:'POST', body:JSON.stringify({id:item.id, action:'approve'})}).then(()=>{alert('已通过');load()})} className="px-3 py-1 bg-green-100 text-green-700 rounded font-bold text-sm">通过</button>
+                                            <button onClick={()=>setActionModal({id:item.id, action:'reject', title:'打回申请'})} className="px-3 py-1 bg-red-100 text-red-700 rounded font-bold text-sm">打回</button>
                                         </>
                                     ) : (
-                                        <button onClick={()=>setActionModal({id:item.id, action:'撤回修改', title:'撤回奖状'})} className="px-3 py-1 bg-orange-100 text-orange-700 rounded font-bold text-sm flex items-center gap-1"><RotateCcw size={14}/> 撤回/打回</button>
+                                        <button onClick={()=>setActionModal({id:item.id, action:'recall', title:'撤回奖状'})} className="px-3 py-1 bg-orange-100 text-orange-700 rounded font-bold text-sm flex items-center gap-1"><RotateCcw size={14}/> 撤回/打回</button>
                                     )}
                                 </td>
                             </tr>
@@ -808,20 +1128,75 @@ const SystemAdminAwardManager = () => {
                 <AwardDetailModal 
                     award={detailModal} 
                     onClose={()=>setDetailModal(null)} 
-                    userRole="admin" // Pass admin role to hide apply button
+                    userRole="admin" 
                 />
             )}
         </div>
     );
 };
 
-// 4. Award Designer (COMPLETELY OVERHAULED FOR ADVANCED RULES)
+// New Standalone Component for Issuance Management (3. Requirement)
+const IssuanceManager = () => {
+    const [issuanceList, setIssuanceList] = useState([]);
+
+    const load = () => {
+        apiFetch('/admin/issued-awards').then(setIssuanceList).catch(console.error);
+    };
+
+    useEffect(() => { load(); }, []);
+
+    const handleDeleteIssuance = async (id) => {
+        if(!confirm('确定要撤销并删除该颁发记录吗？')) return;
+        try {
+            await apiFetch(`/admin/issued-awards/${id}`, { method: 'DELETE' });
+            alert('删除成功');
+            load();
+        } catch(e) { alert(e.message); }
+    };
+
+    return (
+        <div className="space-y-6">
+            <h3 className="text-xl font-bold flex items-center gap-2"><Trophy className="text-orange-500"/> 颁发管理 (Issuance Management)</h3>
+            <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
+                <table className="w-full text-left">
+                    <thead className="bg-slate-50 border-b">
+                        <tr>
+                            <th className="p-4">颁发ID</th><th className="p-4">奖状名称</th><th className="p-4">序列号</th><th className="p-4">申请时间</th><th className="p-4">申请人</th><th className="p-4">等级</th><th className="p-4">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                        {issuanceList.length === 0 && <tr><td colSpan="7" className="p-8 text-center text-slate-400">暂无颁发记录</td></tr>}
+                        {issuanceList.map(item => (
+                            <tr key={item.id}>
+                                <td className="p-4 text-xs font-mono">{item.id}</td>
+                                <td className="p-4 font-bold">{item.award_name} <span className="text-xs text-slate-400">({item.tracking_id})</span></td>
+                                <td className="p-4 font-mono text-sm">{item.serial_number}</td>
+                                <td className="p-4 text-sm text-slate-500">{new Date(item.issued_at).toLocaleString()}</td>
+                                <td className="p-4 font-bold text-blue-600">{item.applicant_call}</td>
+                                <td className="p-4"><span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs font-bold">{item.level}</span></td>
+                                <td className="p-4">
+                                    <button onClick={()=>handleDeleteIssuance(item.id)} className="p-2 bg-red-50 text-red-600 rounded hover:bg-red-100 text-xs font-bold flex items-center gap-1"><Trash2 size={14}/> 删除颁发</button>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+};
+
+// 4. Award Designer (Updated for Full Collection Checkbox)
 const AwardDesigner = ({ initData, onClose }) => {
     // Basic UI States
     const [step, setStep] = useState(1);
     const [bgUrl, setBgUrl] = useState(initData?.bg_url || '');
-    const [layout, setLayout] = useState(initData?.layout || []); 
-    const [dragId, setDragId] = useState(null);
+    // Removed layout state as we only crop now
+    
+    // Image Cropper States
+    const [uploadedImage, setUploadedImage] = useState(null); // The raw file as Image Object
+    const [cropState, setCropState] = useState({ scale: 1, x: 0, y: 0 });
+    const canvasRef = useRef(null);
 
     // Initial Rule Structure (Complex V2)
     const defaultRules = {
@@ -831,8 +1206,9 @@ const AwardDesigner = ({ initData, onClose }) => {
         logic: 'collection', // 'collection' or 'points'
         targets: { type: 'any', list: '' }, // type: any, callsign, dxcc, grid, etc.
         scoring: { cw: 1, phone: 1, data: 1, multis: [] },
-        deduplication: 'none', // none, call, call_band, qso
-        thresholds: [{ name: 'Award', value: 1 }]
+        deduplication: 'none', // none, call, call_band, qso, state, custom
+        deduplicationCustomField: '',
+        thresholds: [{ name: 'Award', value: 1, color: '#eab308', fullCollection: false }]
     };
 
     // Migrate old rules or use init
@@ -844,34 +1220,69 @@ const AwardDesigner = ({ initData, onClose }) => {
 
     const [meta, setMeta] = useState({ name: initData?.name || '', description: initData?.description || '' });
 
-    const handleBgUpload = async (e) => {
-        const f = e.target.files[0];
-        if(!f) return;
-        const fd = new FormData();
-        fd.append('bg', f);
-        try {
-            const res = await apiFetch('/awards/upload-bg', { method: 'POST', body: fd });
-            setBgUrl(res.url);
-        } catch (err) { alert('背景上传失败: ' + err.message); }
+    // Handle initial image load for cropping
+    const handleFileSelect = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+            const img = new Image();
+            img.onload = () => {
+                setUploadedImage(img);
+                // Reset crop
+                setCropState({ scale: 1, x: 0, y: 0 });
+            };
+            img.src = evt.target.result;
+        };
+        reader.readAsDataURL(file);
     };
 
-    const addLayoutElement = (type) => {
-        setLayout([...layout, { id: Date.now(), type, x: 50, y: 50, label: type === 'text' ? '{CALLSIGN}' : 'Logo' }]);
-    };
+    const generateCroppedImage = async () => {
+        return new Promise((resolve, reject) => {
+            if (!uploadedImage) {
+                 resolve(null); 
+                 return;
+            }
 
-    const handleDrag = (e) => {
-        if (!dragId) return;
-        const container = e.currentTarget.getBoundingClientRect();
-        const x = ((e.clientX - container.left) / container.width) * 100; 
-        const y = ((e.clientY - container.top) / container.height) * 100;
-        setLayout(layout.map(el => el.id === dragId ? { ...el, x, y } : el));
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 800; // Fixed output width
+            canvas.height = 600; // Fixed output height
+
+            // Fill white background
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.translate(cropState.x, cropState.y);
+            ctx.scale(cropState.scale, cropState.scale);
+            ctx.drawImage(uploadedImage, 0, 0);
+
+            canvas.toBlob((blob) => {
+                if (blob) resolve(blob);
+                else reject(new Error('Canvas blob failed'));
+            }, 'image/jpeg', 0.9);
+        });
     };
 
     const saveAward = async (status) => {
         try {
             // Validation
             if (!meta.name) throw new Error("请输入奖状名称");
-            if (!bgUrl) throw new Error("请上传奖状背景图");
+            
+            let finalBgUrl = bgUrl;
+
+            // Process image if new one uploaded
+            if (uploadedImage) {
+                const blob = await generateCroppedImage();
+                if (blob) {
+                    const fd = new FormData();
+                    fd.append('bg', blob, 'award_bg.jpg');
+                    const uploadRes = await apiFetch('/awards/upload-bg', { method: 'POST', body: fd });
+                    finalBgUrl = uploadRes.url;
+                }
+            }
+
+            if (!finalBgUrl) throw new Error("请上传并设置奖状底图");
 
             await apiFetch('/awards', {
                 method: 'POST',
@@ -879,9 +1290,9 @@ const AwardDesigner = ({ initData, onClose }) => {
                     id: initData?.id,
                     name: meta.name, 
                     description: meta.description, 
-                    bg_url: bgUrl, 
+                    bg_url: finalBgUrl, 
                     rules, 
-                    layout, 
+                    layout: [], // No longer used, cleared
                     status 
                 })
             });
@@ -894,8 +1305,10 @@ const AwardDesigner = ({ initData, onClose }) => {
     const steps = [
         { id: 1, label: '基本信息', icon: Info },
         { id: 2, label: '规则配置', icon: Settings },
-        { id: 3, label: '视觉设计', icon: Layout }
+        { id: 3, label: '视觉设计', icon: Crop } 
     ];
+
+    const hasSpecificTargets = rules.targets.type !== 'any';
 
     return (
         <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4">
@@ -969,7 +1382,19 @@ const AwardDesigner = ({ initData, onClose }) => {
                                         <div className="text-xs text-slate-400 mb-2">💡 提示：如需匹配任意值（如任意波段），请留空或输入 ANY。</div>
                                         {rules.filters.map((f, idx) => (
                                             <div key={idx} className="flex gap-2">
-                                                <input className="w-1/3 p-2 border rounded text-sm" placeholder="字段 (如 band)" value={f.field} onChange={e=>{const n=[...rules.filters];n[idx].field=e.target.value;setRules({...rules, filters:n})}}/>
+                                                {/* Updated to Select */}
+                                                <select className="w-1/3 p-2 border rounded text-sm" value={f.field} onChange={e=>{const n=[...rules.filters];n[idx].field=e.target.value;setRules({...rules, filters:n})}}>
+                                                    <option value="" disabled>选择字段</option>
+                                                    <option value="band">波段 (BAND)</option>
+                                                    <option value="mode">模式 (MODE)</option>
+                                                    <option value="call">对方呼号 (CALL)</option>
+                                                    <option value="dxcc">DXCC ID</option>
+                                                    <option value="state">州/省 (STATE)</option>
+                                                    <option value="gridsquare">网格 (GRIDSQUARE)</option>
+                                                    <option value="iota">IOTA</option>
+                                                    <option value="freq">频率 (FREQ)</option>
+                                                    <option value="station_callsign">己方呼号 (STATION_CALLSIGN)</option>
+                                                </select>
                                                 <select className="p-2 border rounded text-sm" value={f.operator} onChange={e=>{const n=[...rules.filters];n[idx].operator=e.target.value;setRules({...rules, filters:n})}}>
                                                     <option value="eq">等于 (=)</option><option value="neq">不等于 (!=)</option><option value="gt">大于 (&gt;)</option><option value="contains">包含</option>
                                                 </select>
@@ -977,7 +1402,7 @@ const AwardDesigner = ({ initData, onClose }) => {
                                                 <button onClick={()=>setRules({...rules, filters: rules.filters.filter((_,i)=>i!==idx)})} className="text-red-500"><Trash2 size={16}/></button>
                                             </div>
                                         ))}
-                                        <button onClick={()=>setRules({...rules, filters: [...rules.filters, {field:'', operator:'eq', value:''}]})} className="text-sm font-bold text-blue-600">+ 添加筛选条件</button>
+                                        <button onClick={()=>setRules({...rules, filters: [...rules.filters, {field:'band', operator:'eq', value:''}]})} className="text-sm font-bold text-blue-600">+ 添加筛选条件</button>
                                     </div>
                                 </section>
 
@@ -1000,13 +1425,9 @@ const AwardDesigner = ({ initData, onClose }) => {
                                             <option value="any">任意 QSO (仅依靠筛选)</option>
                                             <option value="callsign">特定呼号列表</option>
                                             <option value="dxcc">特定 DXCC 实体</option>
-                                            <option value="any_dxcc">任意 DXCC (收集唯一 DXCC)</option>
                                             <option value="grid">特定网格 (Grid)</option>
-                                            <option value="any_grid">任意网格 (收集唯一 Grid)</option>
                                             <option value="iota">特定 IOTA</option>
-                                            <option value="any_iota">任意 IOTA (收集唯一 IOTA)</option>
                                             <option value="state">特定州/省 (State)</option>
-                                            <option value="any_state">任意州/省 (收集唯一 State)</option>
                                         </select>
                                         {['callsign', 'dxcc', 'grid', 'iota', 'state'].includes(rules.targets.type) && (
                                             <textarea 
@@ -1032,14 +1453,24 @@ const AwardDesigner = ({ initData, onClose }) => {
                                             ))}
                                         </div>
                                     )}
-                                    <div className="bg-slate-50 p-4 rounded-xl border">
+                                    <div className="bg-slate-50 p-4 rounded-xl border space-y-3">
                                         <label className="block text-sm font-bold mb-2">去重规则 (Deduplication)</label>
                                         <select className="w-full p-2 border rounded" value={rules.deduplication} onChange={e=>setRules({...rules, deduplication: e.target.value})}>
                                             <option value="none">不去重 (所有有效 QSO 均计算)</option>
                                             <option value="call">按呼号去重 (每个呼号只计一次)</option>
                                             <option value="call_band">按呼号+波段去重 (每个呼号每个波段计一次)</option>
                                             <option value="slot">按 Slot 去重 (呼号+波段+模式)</option>
+                                            <option value="state">按州/省去重 (State)</option>
+                                            <option value="custom">按自定义字段去重</option>
                                         </select>
+                                        {rules.deduplication === 'custom' && (
+                                            <input 
+                                                className="w-full p-2 border rounded bg-white" 
+                                                placeholder="输入 ADIF 字段名 (例如: cnty)" 
+                                                value={rules.deduplicationCustomField}
+                                                onChange={e=>setRules({...rules, deduplicationCustomField: e.target.value})}
+                                            />
+                                        )}
                                     </div>
                                 </section>
 
@@ -1056,14 +1487,41 @@ const AwardDesigner = ({ initData, onClose }) => {
                                                     value={t.name}
                                                     onChange={e=>{const n=[...rules.thresholds];n[idx].name=e.target.value;setRules({...rules, thresholds:n})}}
                                                 />
-                                                <span className="font-bold text-yellow-800">需:</span>
-                                                <input 
-                                                    type="number" 
-                                                    className="w-24 p-2 border rounded text-center font-bold" 
-                                                    value={t.value}
-                                                    onChange={e=>{const n=[...rules.thresholds];n[idx].value=parseFloat(e.target.value);setRules({...rules, thresholds:n})}}
-                                                />
-                                                <span className="text-xs text-yellow-800">{rules.logic === 'collection' ? '个' : '分'}</span>
+                                                
+                                                <div className="flex items-center gap-1">
+                                                    <span className="font-bold text-yellow-800 text-sm">分数:</span>
+                                                    <input 
+                                                        type="number" 
+                                                        className="w-16 p-2 border rounded text-center font-bold" 
+                                                        value={t.value}
+                                                        onChange={e=>{const n=[...rules.thresholds];n[idx].value=parseFloat(e.target.value);setRules({...rules, thresholds:n})}}
+                                                    />
+                                                </div>
+
+                                                {/* 3. 全收集独立选项 */}
+                                                {hasSpecificTargets && (
+                                                    <label className="flex items-center gap-1 bg-white px-2 py-1 rounded border cursor-pointer select-none">
+                                                        <input 
+                                                            type="checkbox"
+                                                            checked={!!t.fullCollection}
+                                                            onChange={e=>{const n=[...rules.thresholds];n[idx].fullCollection=e.target.checked;setRules({...rules, thresholds:n})}}
+                                                            className="w-4 h-4 text-blue-600 rounded"
+                                                        />
+                                                        <span className="text-xs font-bold text-slate-600">必须全收集</span>
+                                                    </label>
+                                                )}
+                                                
+                                                {/* Color Picker for Badge */}
+                                                <div className="flex items-center gap-1 border p-1 rounded bg-white">
+                                                    <input 
+                                                        type="color" 
+                                                        className="w-6 h-6 p-0 border-0 rounded cursor-pointer" 
+                                                        value={t.color || '#eab308'}
+                                                        onChange={e=>{const n=[...rules.thresholds];n[idx].color=e.target.value;setRules({...rules, thresholds:n})}}
+                                                        title="设置奖状角标底色"
+                                                    />
+                                                </div>
+
                                                 <button onClick={()=>{
                                                     if (rules.thresholds.length > 1) {
                                                         setRules({...rules, thresholds: rules.thresholds.filter((_,i)=>i!==idx)});
@@ -1071,7 +1529,7 @@ const AwardDesigner = ({ initData, onClose }) => {
                                                 }} className="text-red-500 p-2"><Trash2 size={16}/></button>
                                             </div>
                                         ))}
-                                        <button onClick={()=>setRules({...rules, thresholds: [...(rules.thresholds || []), {name: 'Level ' + ((rules.thresholds?.length||0)+1), value: 0}]})} className="text-sm font-bold text-yellow-700 flex items-center gap-1">
+                                        <button onClick={()=>setRules({...rules, thresholds: [...(rules.thresholds || []), {name: 'Level ' + ((rules.thresholds?.length||0)+1), value: 0, color: '#3b82f6'}]})} className="text-sm font-bold text-yellow-700 flex items-center gap-1">
                                             <Plus size={14}/> 添加等级
                                         </button>
                                     </div>
@@ -1080,39 +1538,90 @@ const AwardDesigner = ({ initData, onClose }) => {
                         </div>
                     )}
 
-                    {/* Step 3: Visual Design (Same as before but cleaner) */}
+                    {/* Step 3: Visual Design (REWRITTEN: Cropper Only) */}
                     {step === 3 && (
                          <div className="flex-1 flex overflow-hidden">
-                            <div className="w-72 bg-slate-50 border-r p-4 overflow-y-auto space-y-6">
+                            <div className="w-80 bg-slate-50 border-r p-4 overflow-y-auto space-y-6">
                                 <div>
-                                    <h4 className="font-bold mb-2">上传背景</h4>
-                                    <input type="file" onChange={handleBgUpload} className="text-sm w-full" />
+                                    <h4 className="font-bold mb-2">底图配置</h4>
+                                    <p className="text-xs text-slate-500 mb-4">请上传原始底图，然后通过缩放和移动将其调整至标准边框内。提交后系统将自动裁剪生成最终底图。</p>
+                                    
+                                    <label className="block w-full p-4 border-2 border-dashed border-slate-300 rounded-xl text-center cursor-pointer hover:bg-white transition-colors">
+                                        <Upload className="mx-auto text-slate-400 mb-2"/>
+                                        <span className="text-sm text-slate-600 font-bold">点击选择图片文件</span>
+                                        <input type="file" onChange={handleFileSelect} className="hidden" accept="image/*" />
+                                    </label>
                                 </div>
-                                <div>
-                                    <h4 className="font-bold mb-2">动态元素</h4>
-                                    <div className="flex flex-col gap-2">
-                                        <button onClick={()=>addLayoutElement('text')} className="bg-white border p-2 rounded text-sm hover:bg-slate-100 flex items-center gap-2"><Move size={14}/> 文本变量 {`{...}`}</button>
-                                        <button onClick={()=>addLayoutElement('image')} className="bg-white border p-2 rounded text-sm hover:bg-slate-100 flex items-center gap-2"><ImageIcon size={14}/> 图片/Logo</button>
-                                    </div>
-                                    <p className="text-xs text-slate-400 mt-2">支持变量: {'{CALLSIGN}'}, {'{DATE}'}, {'{SCORE}'}</p>
-                                </div>
-                            </div>
-                            <div className="flex-1 bg-slate-200 p-8 flex items-center justify-center overflow-auto">
-                                <div className="bg-white shadow-xl relative overflow-hidden select-none"
-                                    style={{ width: '800px', height: '600px', backgroundImage: `url(${bgUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }}
-                                    onMouseMove={handleDrag} onMouseUp={()=>setDragId(null)} onMouseLeave={()=>setDragId(null)}
-                                >
-                                    {layout.map(el => (
-                                        <div key={el.id} className={`absolute cursor-move border border-dashed border-transparent hover:border-blue-500 px-2 py-1 ${dragId === el.id ? 'border-blue-500' : ''}`}
-                                            style={{ left: `${el.x}%`, top: `${el.y}%`, transform: 'translate(-50%, -50%)' }} onMouseDown={()=>setDragId(el.id)}
-                                        >
-                                            <input value={el.label} onChange={e => setLayout(layout.map(x => x.id === el.id ? {...x, label: e.target.value} : x))}
-                                                className="bg-transparent text-black font-bold text-xl border-none focus:ring-0 w-40 text-center" 
-                                                style={{textShadow: '0 0 2px white'}}
+
+                                {uploadedImage && (
+                                    <div className="space-y-4 pt-4 border-t">
+                                        <div>
+                                            <div className="flex justify-between text-xs font-bold mb-1">
+                                                <span>缩放 (Scale)</span>
+                                                <span>{Math.round(cropState.scale * 100)}%</span>
+                                            </div>
+                                            <input 
+                                                type="range" min="0.1" max="3" step="0.05" 
+                                                value={cropState.scale} 
+                                                onChange={e=>setCropState({...cropState, scale: parseFloat(e.target.value)})}
+                                                className="w-full"
                                             />
-                                            <button onClick={()=>setLayout(layout.filter(x=>x.id!==el.id))} className="absolute -top-3 -right-3 bg-red-500 text-white rounded-full p-1 w-5 h-5 flex items-center justify-center text-xs"><X size={10}/></button>
                                         </div>
-                                    ))}
+                                        <div>
+                                            <div className="flex justify-between text-xs font-bold mb-1">
+                                                <span>水平位移 (X)</span>
+                                                <span>{cropState.x}px</span>
+                                            </div>
+                                            <input 
+                                                type="range" min="-800" max="800" step="10" 
+                                                value={cropState.x} 
+                                                onChange={e=>setCropState({...cropState, x: parseInt(e.target.value)})}
+                                                className="w-full"
+                                            />
+                                        </div>
+                                        <div>
+                                            <div className="flex justify-between text-xs font-bold mb-1">
+                                                <span>垂直位移 (Y)</span>
+                                                <span>{cropState.y}px</span>
+                                            </div>
+                                            <input 
+                                                type="range" min="-600" max="600" step="10" 
+                                                value={cropState.y} 
+                                                onChange={e=>setCropState({...cropState, y: parseInt(e.target.value)})}
+                                                className="w-full"
+                                            />
+                                        </div>
+                                        <button onClick={()=>setCropState({scale:1,x:0,y:0})} className="w-full py-2 bg-slate-200 rounded text-xs font-bold">重置位置</button>
+                                    </div>
+                                )}
+                            </div>
+                            
+                            <div className="flex-1 bg-slate-800 p-8 flex items-center justify-center overflow-auto relative">
+                                {/* Preview Container 800x600 Fixed */}
+                                <div className="relative shadow-2xl bg-white overflow-hidden" style={{ width: '800px', height: '600px', flexShrink: 0 }}>
+                                    {uploadedImage ? (
+                                        <img 
+                                            src={uploadedImage.src} 
+                                            style={{
+                                                transform: `translate(${cropState.x}px, ${cropState.y}px) scale(${cropState.scale})`,
+                                                transformOrigin: '0 0', // Important for translate working with scale predictably logic can be simpler if origin is top-left
+                                            }}
+                                            className="origin-top-left"
+                                            draggable={false}
+                                            alt="Preview"
+                                        />
+                                    ) : (
+                                        bgUrl ? (
+                                            <img src={bgUrl} className="w-full h-full object-cover" alt="Current BG" />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center text-slate-300">
+                                                暂无图片
+                                            </div>
+                                        )
+                                    )}
+                                </div>
+                                <div className="absolute top-4 left-4 text-white text-xs bg-black/50 p-2 rounded">
+                                    预览区域: 800 x 600 px (最终输出)
                                 </div>
                             </div>
                         </div>
@@ -1122,7 +1631,7 @@ const AwardDesigner = ({ initData, onClose }) => {
                 {/* Footer */}
                 <div className="p-4 border-t bg-slate-50 flex justify-between items-center">
                     <div className="text-xs text-slate-400">
-                        {step === 2 && '提示: 配置完成后，请前往"视觉设计"步骤设置证书外观。'}
+                        {step === 3 && '提示: 提交审核或保存草稿时，系统将自动裁剪当前视图作为最终底图。'}
                     </div>
                     <div className="flex gap-4">
                         <button onClick={()=>saveAward('draft')} className="px-6 py-2 border rounded-lg font-bold text-slate-600">保存草稿</button>
@@ -1289,6 +1798,8 @@ const UserCenterView = ({ user, refreshUser, onLogout }) => {
 
 // 6. Logbook View (Same as provided, kept intact)
 const LogbookView = () => {
+    // 4. 普通用户界面中，全部日志应与日志管理同级显示 -> This component now only handles UPLOAD.
+    // List view logic moved to 'AllLogsView'
     const [file, setFile] = useState(null);
     const [uploading, setUploading] = useState(false);
     const [stats, setStats] = useState(null);
@@ -1308,8 +1819,8 @@ const LogbookView = () => {
 
     return (
         <div className="space-y-6">
+            <h3 className="font-bold text-lg flex items-center gap-2"><Upload className="text-blue-600"/> 上传日志 (ADIF)</h3>
             <div className="bg-white p-6 rounded-2xl shadow-sm border">
-                <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><Upload className="text-blue-600"/> 上传日志 (ADIF)</h3>
                 <form onSubmit={handleUpload} className="space-y-4">
                     <div className="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center hover:bg-slate-50 transition-colors">
                         <input type="file" accept=".adi,.adif" onChange={e => setFile(e.target.files[0])} className="hidden" id="adif-input" />
@@ -1330,6 +1841,108 @@ const LogbookView = () => {
                     </div>
                 )}
             </div>
+        </div>
+    );
+};
+
+// New: All Logs View (Separated from LogbookView - Fixed data loading issue)
+const AllLogsView = () => {
+    const [logs, setLogs] = useState([]);
+    const [detailQso, setDetailQso] = useState(null);
+    const [qsoAwards, setQsoAwards] = useState([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        // 1. 修复：当前普通用户界面中，全部日志未显示当前用户的完整日志
+        setLoading(true);
+        apiFetch('/user/qsos')
+            .then(data => {
+                // Ensure data is an array
+                if (Array.isArray(data)) setLogs(data);
+                else setLogs([]);
+            })
+            .catch(console.error)
+            .finally(() => setLoading(false));
+    }, []);
+
+    const showQsoDetails = async (qso) => {
+        setDetailQso(qso);
+        setQsoAwards([]);
+        try {
+            const awards = await apiFetch(`/qsos/${qso.id}/awards`);
+            setQsoAwards(awards);
+        } catch(e) { console.error(e); }
+    };
+
+    return (
+        <div className="space-y-6">
+            <h3 className="font-bold text-lg flex items-center gap-2"><List className="text-blue-600"/> 全部日志</h3>
+            <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                        <thead className="bg-slate-50 text-slate-500 font-bold border-b">
+                            <tr>
+                                <th className="p-4">操作</th>
+                                <th className="p-4">Date</th>
+                                <th className="p-4">Callsign</th>
+                                <th className="p-4">Band</th>
+                                <th className="p-4">Mode</th>
+                                <th className="p-4">Country</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                            {loading ? (
+                                <tr><td colSpan="6" className="p-8 text-center text-slate-400">加载中...</td></tr>
+                            ) : logs.length === 0 ? (
+                                <tr><td colSpan="6" className="p-8 text-center text-slate-400">暂无日志</td></tr>
+                            ) : (
+                                logs.map(log => (
+                                    <tr key={log.id} className="hover:bg-slate-50">
+                                        <td className="p-4">
+                                            <button onClick={()=>showQsoDetails(log)} className="px-3 py-1 bg-blue-50 text-blue-600 rounded text-xs font-bold hover:bg-blue-100 border border-blue-200">详情</button>
+                                        </td>
+                                        <td className="p-4 font-mono">{log.qso_date}</td>
+                                        <td className="p-4 font-bold">{log.callsign}</td>
+                                        <td className="p-4">{log.band}</td>
+                                        <td className="p-4">{log.mode}</td>
+                                        <td className="p-4 text-slate-500 truncate max-w-[150px]">{log.country}</td>
+                                    </tr>
+                                ))
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            {detailQso && (
+                <div className="fixed inset-0 bg-black/50 z-[200] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl w-full max-w-lg p-6 relative">
+                        <button onClick={()=>setDetailQso(null)} className="absolute top-4 right-4 text-slate-400 hover:text-black"><X/></button>
+                        <h3 className="text-xl font-bold mb-4 flex items-center gap-2"><Database className="text-blue-500"/> QSO 详情</h3>
+                        
+                        <div className="bg-slate-50 p-4 rounded-xl border grid grid-cols-2 gap-4 mb-6 text-sm">
+                            <div><span className="text-slate-400 block text-xs uppercase">Callsign</span><span className="font-bold text-lg">{detailQso.callsign}</span></div>
+                            <div><span className="text-slate-400 block text-xs uppercase">Date</span><span className="font-bold">{detailQso.qso_date}</span></div>
+                            <div><span className="text-slate-400 block text-xs uppercase">Band</span><span className="font-bold">{detailQso.band}</span></div>
+                            <div><span className="text-slate-400 block text-xs uppercase">Mode</span><span className="font-bold">{detailQso.mode}</span></div>
+                            <div className="col-span-2"><span className="text-slate-400 block text-xs uppercase">Country</span><span className="font-bold">{detailQso.country || '-'}</span></div>
+                            <div className="col-span-2"><span className="text-slate-400 block text-xs uppercase">State</span><span className="font-bold">{detailQso.state || '-'}</span></div>
+                        </div>
+
+                        <h4 className="font-bold text-sm mb-2 flex items-center gap-2"><Award size={14}/> 参与的奖项申领 (Participating Awards)</h4>
+                        <div className="space-y-2 max-h-40 overflow-y-auto">
+                            {qsoAwards.length === 0 ? <div className="text-slate-400 text-xs italic">该 QSO 暂未符合任何已发布奖项的基础条件</div> : (
+                                qsoAwards.map(a => (
+                                    <div key={a.id} className="p-2 border rounded bg-yellow-50 text-yellow-800 text-xs font-bold flex justify-between items-center">
+                                        <span>{a.name}</span>
+                                        <CheckCircle size={12} className="text-green-600"/>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
@@ -1426,7 +2039,6 @@ export default function App() {
   const [view, setView] = useState('loading'); 
   const [user, setUser] = useState(null);
   const [subView, setSubView] = useState('dashboard');
-  const [loginTab, setLoginTab] = useState('user'); 
   const [show2FAInput, setShow2FAInput] = useState(false);
   const [loginForm, setLoginForm] = useState({});
   const [authMode, setAuthMode] = useState('login'); // Added for in-page register
@@ -1459,7 +2071,7 @@ export default function App() {
       e.preventDefault();
       const formData = new FormData(e.target);
       const data = Object.fromEntries(formData);
-      const payload = { ...loginForm, ...data, loginType: loginTab };
+      const payload = { ...loginForm, ...data }; // Removed loginType
       
       try {
           const res = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify(payload) });
@@ -1504,14 +2116,11 @@ export default function App() {
 
         {authMode === 'login' ? (
             <div className="p-8">
-                <div className="flex mb-6 bg-slate-100 p-1 rounded-lg">
-                    <button onClick={()=>{setLoginTab('user'); setShow2FAInput(false)}} className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${loginTab==='user'?'bg-white shadow text-black':'text-slate-500'}`}>普通用户</button>
-                    <button onClick={()=>{setLoginTab('admin'); setShow2FAInput(false)}} className={`flex-1 py-2 text-xs font-bold rounded-md transition-all ${loginTab==='admin'?'bg-slate-800 shadow text-white':'text-slate-500'}`}>管理员</button>
-                </div>
+                {/* Merged Login: No more Admin/User toggle */}
                 <form onSubmit={handleLogin} className="space-y-4">
                     {!show2FAInput ? (
                         <>
-                            <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">呼号</label><input name="callsign" required className="w-full border rounded-lg p-3 outline-none focus:ring-2 ring-blue-100 transition-all" /></div>
+                            <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">呼号 (用户名)</label><input name="callsign" required className="w-full border rounded-lg p-3 outline-none focus:ring-2 ring-blue-100 transition-all" /></div>
                             <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">密码</label><input name="password" type="password" required className="w-full border rounded-lg p-3 outline-none focus:ring-2 ring-blue-100 transition-all" /></div>
                         </>
                     ) : (
@@ -1521,7 +2130,9 @@ export default function App() {
                             <button type="button" onClick={()=>setShow2FAInput(false)} className="text-xs text-slate-400 hover:text-slate-600 underline w-full text-center block mt-2">返回重新输入账号</button>
                         </div>
                     )}
-                    <button className={`w-full py-4 rounded-xl font-bold text-white shadow-lg transition-transform active:scale-95 ${loginTab==='admin'?'bg-slate-800 shadow-slate-200':'bg-blue-600 shadow-blue-200'}`}>{show2FAInput ? '验证并登录' : '登录系统'}</button>
+                    <button className="w-full py-4 bg-slate-900 text-white rounded-xl font-bold shadow-lg shadow-slate-200 transition-transform active:scale-95 hover:bg-black">
+                        {show2FAInput ? '验证并登录' : '登录系统'}
+                    </button>
                 </form>
             </div>
         ) : (
@@ -1547,10 +2158,13 @@ export default function App() {
           { id: 'dashboard', label: '概览', icon: BarChart, show: true },
           { id: 'awards', label: '奖状大厅', icon: Award, show: true },
           { id: 'my_awards', label: '我的奖状', icon: CheckCircle, show: user.role === 'user' },
-          { id: 'logbook', label: '日志管理', icon: Database, show: user.role === 'user' },
+          { id: 'logbook', label: '日志上传', icon: Upload, show: user.role === 'user' }, // Renamed from "日志管理"
+          { id: 'all_logs', label: '全部日志', icon: List, show: user.role === 'user' }, // 4. "全部日志" separated
+          
           // Updated Menu Structure
-          { id: 'awardCreator', label: '奖状管理', icon: FilePlus, show: user.role === 'award_admin' },
-          { id: 'awardAudit', label: '奖状审核', icon: ShieldCheck, show: user.role === 'admin' },
+          { id: 'awardCreator', label: '奖状管理', icon: FilePlus, show: user.role === 'award_admin' }, // Changed Label
+          { id: 'awardAudit', label: '奖状管理', icon: ShieldCheck, show: user.role === 'admin' },
+          { id: 'issuanceManager', label: '颁发管理', icon: Trophy, show: user.role === 'admin' }, // 3. "颁发管理" separated
           
           { id: 'users', label: '用户管理', icon: Users, show: user.role === 'admin' },
           { id: 'userCenter', label: '用户中心', icon: User, show: true },
@@ -1580,11 +2194,13 @@ export default function App() {
                       {subView === 'awards' && <AwardCenterView user={user} />} 
                       {subView === 'my_awards' && <MyAwardsView user={user} />}
                       {subView === 'logbook' && <LogbookView />}
+                      {subView === 'all_logs' && <AllLogsView />}
                       {subView === 'users' && <UserManage />}
                       
                       {/* New Split Views */}
                       {subView === 'awardCreator' && <AwardAdminManager />}
-                      {subView === 'awardAudit' && <SystemAdminAwardManager />}                      
+                      {subView === 'awardAudit' && <SystemAdminAwardManager />}
+                      {subView === 'issuanceManager' && <IssuanceManager />}                      
                       {subView === 'userCenter' && <UserCenterView user={user} refreshUser={refreshUser} onLogout={handleLogout} />}
                   </div>
               </main>
