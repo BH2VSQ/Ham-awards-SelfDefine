@@ -46,21 +46,29 @@ let appConfig = {
  * 1. 工具函数：ADIF 解析 & MinIO 初始化
  * ==========================================
  */
+/**
+ * 解析 ADIF 格式的日志文件
+ * @param {string} adifString - ADIF 格式的原始字符串
+ * @returns {Array} 解析后的 QSO 记录数组
+ */
 function parseAdif(adifString) {
   const records = [];
+  // 按 EOR (End of Record) 标记分割记录
   const parts = adifString.split(/<eor>/i); 
   
   for (let part of parts) {
-    if (!part.trim()) continue;
+    if (!part.trim()) continue; // 跳过空记录
     const record = {};
+    // 正则表达式匹配 ADIF 字段格式: <field: length>data
     const regex = /<([a-zA-Z0-9_]+):(\d+)(?::[a-zA-Z])?>([^<]*)/g;
     let match;
     while ((match = regex.exec(part)) !== null) {
-      const field = match[1].toLowerCase();
-      const length = parseInt(match[2]);
-      const data = match[3].substring(0, length);
-      record[field] = data.trim();
+      const field = match[1].toLowerCase(); // 字段名转小写
+      const length = parseInt(match[2]); // 字段长度
+      const data = match[3].substring(0, length); // 提取指定长度的数据
+      record[field] = data.trim(); // 去除首尾空格
     }
+    // 只保留包含呼号和日期的有效记录
     if (record.call && record.qso_date) {
       records.push(record);
     }
@@ -68,13 +76,22 @@ function parseAdif(adifString) {
   return records;
 }
 
+/**
+ * 初始化 MinIO 存储桶
+ * @returns {Promise<void>}
+ */
 async function initMinioBucket() {
+    // 检查 MinIO 客户端和存储桶配置是否存在
     if (!minioClient || !appConfig.minioBucket) return;
     try {
+        // 检查存储桶是否已存在
         const exists = await minioClient.bucketExists(appConfig.minioBucket);
         if (!exists) {
+            // 创建新的存储桶
             await minioClient.makeBucket(appConfig.minioBucket, 'us-east-1');
             console.log(`Bucket '${appConfig.minioBucket}' created successfully.`);
+            
+            // 设置存储桶访问策略，允许公共读取
             const policy = {
                 Version: "2012-10-17",
                 Statement: [{
@@ -96,36 +113,55 @@ async function initMinioBucket() {
  * 2. 系统初始化
  * ==========================================
  */
+/**
+ * 加载系统配置
+ * @returns {void}
+ */
 function loadConfig() {
+  // 检查配置文件是否存在
   if (fs.existsSync(CONFIG_FILE)) {
     try {
+      // 读取并解析配置文件
       const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      // 合并配置到全局配置对象
       appConfig = { ...appConfig, ...data };
       
+      // 初始化数据库连接池
       if (appConfig.installed && appConfig.db) {
         dbPool = new Pool(appConfig.db);
         console.log("Database pool initialized.");
+        // 升级数据库 schema
         upgradeSchema();
       }
+      
+      // 初始化 MinIO 客户端
       if (appConfig.minio && appConfig.minio.endPoint) {
         minioClient = new Minio.Client(appConfig.minio);
         console.log("MinIO client initialized.");
+        // 初始化 MinIO 存储桶
         initMinioBucket();
       }
     } catch (e) { 
       console.error("Config load error:", e);
+      // 配置加载失败，标记系统未安装
       appConfig.installed = false;
     }
   } else {
+    // 配置文件不存在，标记系统未安装
     appConfig.installed = false;
   }
 }
 
+/**
+ * 升级数据库 schema
+ * @returns {Promise<void>}
+ */
 async function upgradeSchema() {
+  // 检查数据库连接池是否存在
   if (!dbPool) return;
   const client = await dbPool.connect();
   try {
-    // 基础用户表
+    // 创建用户表
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY, 
@@ -137,13 +173,13 @@ async function upgradeSchema() {
       );
     `);
 
-    // 修复 last_seen
+    // 检查并添加 last_seen 字段
     const checkCol = await client.query("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='last_seen'");
     if (checkCol.rows.length === 0) {
         await client.query("ALTER TABLE users ADD COLUMN last_seen TIMESTAMP DEFAULT NOW()");
     }
 
-    // QSO 表
+    // 创建 QSO 表
     await client.query(`
       CREATE TABLE IF NOT EXISTS qsos (
         id SERIAL PRIMARY KEY, 
@@ -160,7 +196,7 @@ async function upgradeSchema() {
       );
     `);
 
-    // Awards 表 - 包含新字段 tracking_id, audit_log, reject_reason
+    // 创建 Awards 表
     await client.query(`
       CREATE TABLE IF NOT EXISTS awards (
         id SERIAL PRIMARY KEY, 
@@ -185,6 +221,7 @@ async function upgradeSchema() {
     if (!cols.includes('audit_log')) await client.query("ALTER TABLE awards ADD COLUMN audit_log JSONB DEFAULT '[]'");
     if (!cols.includes('reject_reason')) await client.query("ALTER TABLE awards ADD COLUMN reject_reason TEXT");
 
+    // 创建 user_awards 表
     await client.query(`
         CREATE TABLE IF NOT EXISTS user_awards (
             id SERIAL PRIMARY KEY,
@@ -197,18 +234,18 @@ async function upgradeSchema() {
         );
     `);
     
-    // Check user_awards columns for upgrade
+    // 检查 user_awards 表的列 (用于旧数据库升级)
     const uaCols = await client.query("SELECT column_name FROM information_schema.columns WHERE table_name='user_awards'");
     const uaColNames = uaCols.rows.map(r => r.column_name);
     if (!uaColNames.includes('serial_number')) await client.query("ALTER TABLE user_awards ADD COLUMN serial_number VARCHAR(20)");
     if (!uaColNames.includes('level')) await client.query("ALTER TABLE user_awards ADD COLUMN level VARCHAR(50)");
     if (!uaColNames.includes('score_snapshot')) await client.query("ALTER TABLE user_awards ADD COLUMN score_snapshot INTEGER");
 
-
     console.log("Database schema checked.");
   } catch (err) {
     console.error("Schema upgrade error:", err.message);
   } finally {
+    // 释放数据库连接
     client.release();
   }
 }
@@ -219,15 +256,31 @@ async function upgradeSchema() {
  * ==========================================
  */
 
+/**
+ * 分类通联模式
+ * @param {string} mode - 通联模式字符串
+ * @returns {string} 分类后的模式类型: 'cw', 'phone' 或 'data'
+ */
 const categorizeMode = (mode) => {
+    // 转换为大写并处理空值
     mode = mode?.toUpperCase() || '';
-    if (['CW'].includes(mode)) return 'cw';
+    // 分类为 CW
+    if (['CW','PCW'].includes(mode)) return 'cw';
+    // 分类为 Phone
     if (['SSB', 'AM', 'FM', 'USB', 'LSB'].includes(mode)) return 'phone';
-    // All digital modes default to data
-    if (['FT8', 'FT4', 'RTTY', 'PSK31', 'JT65', 'JS8'].includes(mode)) return 'data';
+    // 分类为 Data
+    if (['FT8', 'FT4', 'RTTY', 'RTTYM', 'PSK31', 'FSK', 'PSK', 'JT65', 'JS8','SSTV'].includes(mode)) return 'data';
+    // 默认为 Data
     return 'data'; // Default to data for unknown
 };
 
+/**
+ * 评估用户是否符合奖状申请条件
+ * @param {number} userId - 用户 ID
+ * @param {number} awardId - 奖状 ID
+ * @param {boolean} includeQsos - 是否包含匹配的 QSO 详情
+ * @returns {Promise<Object>} 评估结果
+ */
 const evaluateAward = async (userId, awardId, includeQsos = false) => {
     const client = await dbPool.connect();
     try {
@@ -448,21 +501,33 @@ const evaluateAward = async (userId, awardId, includeQsos = false) => {
  * ==========================================
  */
 
+/**
+ * 验证 JWT 令牌的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const verifyToken = async (req, res, next) => {
+  // 安装路由和公开路由不需要验证
   if (!appConfig.installed && req.path.startsWith('/api/install')) return next();
   if (req.path === '/api/system-status' || req.path === '/api/auth/login' || req.path === '/api/auth/register') return next(); 
 
+  // 从请求头获取令牌
   const token = req.headers['authorization'];
   if (!token) return res.status(401).json({ error: 'TOKEN_MISSING', message: '未提供验证令牌' });
   
   let decoded;
   try {
+    // 验证令牌
     decoded = jwt.verify(token.split(' ')[1], appConfig.jwtSecret);
   } catch (err) { 
     return res.status(401).json({ error: 'TOKEN_INVALID', message: '无效或过期的令牌' }); 
   }
 
+  // 将解码后的用户信息存储到请求对象
   req.user = decoded; 
+  // 更新用户最后登录时间
   if (dbPool && req.user && req.user.id) {
       dbPool.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [req.user.id])
           .catch(err => console.error("Update last_seen failed:", err.message));
@@ -470,25 +535,52 @@ const verifyToken = async (req, res, next) => {
   next();
 };
 
+/**
+ * 验证系统管理员权限的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const verifyAdmin = (req, res, next) => {
+  // 检查用户角色是否为 admin
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'PERMISSION_DENIED', message: '需要系统管理员权限' });
   next();
 };
 
+/**
+ * 验证奖状管理员权限的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const verifyAwardAdmin = (req, res, next) => {
+  // 检查用户角色是否为 admin 或 award_admin
   if (req.user.role !== 'admin' && req.user.role !== 'award_admin') return res.status(403).json({ error: 'PERMISSION_DENIED', message: '需要奖状管理员权限' });
   next();
 };
 
+/**
+ * 要求 2FA 验证的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const require2FA = async (req, res, next) => {
     try {
+        // 获取用户的 2FA 密钥
         const result = await dbPool.query('SELECT totp_secret FROM users WHERE id = $1', [req.user.id]);
         const secret = result.rows[0]?.totp_secret;
+        // 如果用户未启用 2FA，直接通过
         if (!secret) return next(); 
 
+        // 从请求头获取 2FA 验证码
         const code = req.headers['x-2fa-code']; 
         if (!code) return res.status(403).json({ error: '2FA_REQUIRED', message: '此操作需要2FA验证' });
         
+        // 验证 2FA 验证码
         if (!otplib.authenticator.check(code, secret)) {
             return res.status(403).json({ error: 'INVALID_2FA', message: '验证码错误' });
         }
@@ -496,11 +588,21 @@ const require2FA = async (req, res, next) => {
     } catch (e) { res.status(500).json({ error: 'Server Error' }); }
 };
 
+/**
+ * 要求密码确认的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const requirePassword = async (req, res, next) => {
+    // 从请求体获取密码
     const { password } = req.body;
     if (!password) return res.status(400).json({ error: 'PASSWORD_REQUIRED', message: '需要密码确认' });
     try {
+        // 获取用户的密码哈希
         const r = await dbPool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
+        // 验证密码
         const match = await bcrypt.compare(password, r.rows[0].password_hash);
         if (!match) return res.status(401).json({ error: 'PASSWORD_INVALID', message: '密码错误' });
         next();
