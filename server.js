@@ -364,9 +364,9 @@ async function initMinioBucket() {
  */
 /**
  * 加载系统配置
- * @returns {void}
+ * @returns {Promise<void>}
  */
-function loadConfig() {
+async function loadConfig() {
   // 检查配置文件是否存在
   if (fs.existsSync(CONFIG_FILE)) {
     try {
@@ -380,7 +380,7 @@ function loadConfig() {
         dbPool = new Pool(appConfig.db);
         console.log("Database pool initialized.");
         // 升级数据库 schema
-        upgradeSchema();
+        await upgradeSchema();
       }
       
       // 初始化 MinIO 客户端
@@ -388,7 +388,7 @@ function loadConfig() {
         minioClient = new Minio.Client(appConfig.minio);
         console.log("MinIO client initialized.");
         // 初始化 MinIO 存储桶
-        initMinioBucket();
+        await initMinioBucket();
       }
     } catch (e) { 
       console.error("Config load error:", e);
@@ -1531,6 +1531,14 @@ app.post('/api/admin/settings', verifyToken, verifyAdmin, require2FA, async (req
 });
 
 // 启动
-loadConfig();
-const PORT = 9993;
-http.createServer(app).listen(PORT, () => console.log(`Server running on port ${PORT}`));
+async function startServer() {
+  try {
+    await loadConfig();
+    const PORT = 3003;
+    http.createServer(app).listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  } catch (error) {
+    console.error("Error starting server:", error);
+  }
+}
+
+startServer();
