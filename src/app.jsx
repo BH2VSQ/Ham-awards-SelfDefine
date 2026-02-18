@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import html2canvas from 'html2canvas';
 // 移除外部引用，直接在下方定义
 // import InstallView from './install.jsx'; 
 import { 
@@ -43,7 +44,16 @@ const apiFetch = async (endpoint, options = {}) => {
       throw { status: 401, message: '登录已过期，正在跳转...' };
   }
 
-  const data = await res.json();
+  let data;
+  const text = await res.text();
+  try {
+    data = JSON.parse(text);
+  } catch (jsonError) {
+    console.error('JSON解析错误:', jsonError);
+    console.error('响应状态:', res.status);
+    console.error('响应文本:', text);
+    throw { status: res.status, error: 'JSON_ERROR', message: '服务器响应格式错误' };
+  }
   if (!res.ok) throw { status: res.status, ...data };
   return data;
 };
@@ -286,7 +296,9 @@ const DashboardView = ({ user }) => {
             )}
         </div>
     );
-};
+}
+
+export default App;
 
 // Log Matrix Component (Updated for dynamic columns based on deduplication)
 const LogMatchMatrix = ({ qsos, award, checkResult }) => {
@@ -435,6 +447,7 @@ const MyAwardsView = ({ user }) => {
     const [awards, setAwards] = useState([]);
     const [loading, setLoading] = useState(true);
     const [selectedAward, setSelectedAward] = useState(null); // For detail view
+    const awardRefs = useRef({}); // Store refs for each award card
 
     useEffect(() => {
         apiFetch('/user/my-awards')
@@ -462,6 +475,229 @@ const MyAwardsView = ({ user }) => {
         return '#eab308'; // Default yellow-500
     };
 
+    const handleDownload = async (e, awardId, award) => {
+        e.stopPropagation();
+        
+        try {
+            const cardElement = awardRefs.current[awardId];
+            if (!cardElement) {
+                throw new Error('找不到奖状卡片元素');
+            }
+
+            // 创建一个克隆元素，用于生成无边框的图片
+            const cloneElement = cardElement.cloneNode(true);
+            // 移除克隆元素的边框和阴影
+            cloneElement.style.border = 'none';
+            cloneElement.style.boxShadow = 'none';
+            cloneElement.style.margin = '0';
+            cloneElement.style.padding = '0';
+            
+            // 临时将克隆元素添加到文档中（但不可见）
+            cloneElement.style.position = 'absolute';
+            cloneElement.style.top = '-9999px';
+            cloneElement.style.left = '-9999px';
+            cloneElement.style.width = '800px'; // 设置固定宽度以确保生成的图片大小一致
+            document.body.appendChild(cloneElement);
+
+            // 等待所有图片加载完成
+            await new Promise((resolve) => {
+                const images = cloneElement.querySelectorAll('img');
+                const backgroundDivs = cloneElement.querySelectorAll('[style*="backgroundImage"]');
+                const allElements = [...images, ...backgroundDivs];
+                let loaded = 0;
+                const total = allElements.length;
+                
+                if (total === 0) {
+                    resolve();
+                    return;
+                }
+                
+                allElements.forEach(element => {
+                    if (element.tagName === 'IMG') {
+                        // 处理img元素
+                        if (element.complete) {
+                            loaded++;
+                            if (loaded === total) resolve();
+                        } else {
+                            element.onload = () => {
+                                loaded++;
+                                if (loaded === total) resolve();
+                            };
+                            element.onerror = () => {
+                                loaded++;
+                                if (loaded === total) resolve();
+                            };
+                        }
+                    } else {
+                        // 处理带有背景图片的div
+                        const bgStyle = element.style.backgroundImage;
+                        if (bgStyle) {
+                            const urlMatch = bgStyle.match(/url\(['"]?(.*?)['"]?\)/);
+                            if (urlMatch) {
+                                const bgUrl = urlMatch[1];
+                                const img = new Image();
+                                img.crossOrigin = 'anonymous';
+                                img.onload = () => {
+                                    loaded++;
+                                    if (loaded === total) resolve();
+                                };
+                                img.onerror = () => {
+                                    loaded++;
+                                    if (loaded === total) resolve();
+                                };
+                                img.src = bgUrl;
+                            } else {
+                                loaded++;
+                                if (loaded === total) resolve();
+                            }
+                        } else {
+                            loaded++;
+                            if (loaded === total) resolve();
+                        }
+                    }
+                });
+            });
+
+            // 使用 html2canvas 捕获克隆元素
+            console.log('开始生成图片，克隆元素:', cloneElement);
+            const canvas = await html2canvas(cloneElement, {
+                scale: 2, // 提高分辨率
+                useCORS: true,
+                backgroundColor: '#ffffff',
+                allowTaint: true,
+                logging: true,
+                removeContainer: true,
+                width: 800,
+                height: 566, // 1.414:1 的宽高比
+                x: 0,
+                y: 0
+            });
+            console.log('Canvas生成成功，尺寸:', canvas.width, 'x', canvas.height);
+
+            // 移除临时克隆元素
+            if (document.body.contains(cloneElement)) {
+                document.body.removeChild(cloneElement);
+            }
+
+            // 转换为Blob并创建URL
+            const blob = await new Promise((resolve) => {
+                canvas.toBlob(resolve, 'image/png', 1.0);
+            });
+            
+            if (!blob) {
+                throw new Error('Blob生成失败');
+            }
+            
+            console.log('Blob生成成功，大小:', blob.size);
+            const url = URL.createObjectURL(blob);
+            
+            // 打开新窗口预览并下载
+            const newWindow = window.open();
+            if (!newWindow) {
+                // 如果无法打开新窗口，直接下载
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `award_${award.serial_number}_${award.name.replace(/\s+/g, '_')}.png`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                setTimeout(() => {
+                    URL.revokeObjectURL(url);
+                }, 10000);
+                return;
+            }
+            
+            // 写入新窗口内容
+            newWindow.document.write(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>奖状预览</title>
+                    <style>
+                        body {
+                            margin: 20px;
+                            padding: 0;
+                            font-family: Arial, sans-serif;
+                            background-color: #f5f5f5;
+                        }
+                        .container {
+                            max-width: 800px;
+                            margin: 0 auto;
+                            text-align: center;
+                        }
+                        img {
+                            max-width: 100%;
+                            max-height: 80vh;
+                            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                            border-radius: 8px;
+                        }
+                        .download-btn {
+                            margin-top: 20px;
+                            padding: 10px 20px;
+                            background-color: #3b82f6;
+                            color: white;
+                            border: none;
+                            border-radius: 4px;
+                            cursor: pointer;
+                            font-size: 16px;
+                            text-decoration: none;
+                            display: inline-block;
+                        }
+                        .download-btn:hover {
+                            background-color: #2563eb;
+                        }
+                        .loading {
+                            margin: 20px;
+                            padding: 20px;
+                            background-color: #f0f0f0;
+                            border-radius: 4px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>奖状预览</h1>
+                        <div class="loading" id="loading">生成图片中，请稍候...</div>
+                        <img src="${url}" alt="奖状" id="award-image" style="display: none;" onload="document.getElementById('loading').style.display='none'; this.style.display='block';" />
+                        <a href="${url}" class="download-btn" download="award_${award.serial_number}_${award.name.replace(/\s+/g, '_')}.png">下载奖状</a>
+                    </div>
+                    <script>
+                        // 自动触发下载
+                        setTimeout(() => {
+                            const link = document.createElement('a');
+                            link.href = '${url}';
+                            link.download = 'award_${award.serial_number}_${award.name.replace(/\s+/g, '_')}.png';
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                        }, 1500);
+                    </script>
+                </body>
+                </html>
+            `);
+            
+            // 延迟清理，确保文件下载完成
+            setTimeout(() => {
+                URL.revokeObjectURL(url);
+            }, 10000);
+            
+        } catch (error) {
+            console.error('下载失败:', error);
+            // 移除临时元素（如果存在）
+            try {
+                const tempElements = document.querySelectorAll('[style*="top: -9999px"]');
+                tempElements.forEach(el => {
+                    if (document.body.contains(el)) {
+                        document.body.removeChild(el);
+                    }
+                });
+            } catch (cleanupError) {
+                console.error('清理临时元素失败:', cleanupError);
+            }
+            alert('下载失败，请稍后重试: ' + error.message);
+        }
+    };
+
     return (
         <div className="space-y-6">
             <h3 className="text-xl font-bold flex items-center gap-2"><Award className="text-orange-500"/> 我的荣誉墙 (My Awards)</h3>
@@ -471,8 +707,11 @@ const MyAwardsView = ({ user }) => {
                     const textColor = getContrastColor(badgeColor);
                     return (
                         <div key={ua.id} className="relative group perspective cursor-pointer" onClick={() => setSelectedAward(ua)}>
-                            {/* Certificate Card */}
-                            <div className="bg-white rounded-xl shadow-xl overflow-hidden border-4 border-slate-900 aspect-[1.414/1] relative">
+                            {/* Certificate Card with ref */}
+                            <div 
+                                ref={el => awardRefs.current[ua.id] = el}
+                                className="bg-white rounded-xl shadow-xl overflow-hidden border-4 border-slate-900 aspect-[1.414/1] relative"
+                            >
                                  {/* Background */}
                                  <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: `url(${ua.bg_url})`}}></div>
                                  <div className="absolute inset-0 bg-black/10"></div>
@@ -506,6 +745,12 @@ const MyAwardsView = ({ user }) => {
                             {/* Action Bar */}
                             <div className="mt-4 flex justify-between items-center px-2">
                                  <div className="text-sm font-bold text-slate-600 flex items-center gap-2"><Eye size={14}/> {ua.name}</div>
+                                 <button 
+                                     onClick={(e) => handleDownload(e, ua.id, ua)}
+                                     className="flex items-center gap-1 bg-blue-600 text-white px-3 py-1 rounded-lg text-xs font-bold hover:bg-blue-700 transition-colors"
+                                 >
+                                     <Download size={12}/> 下载奖状
+                                 </button>
                             </div>
                         </div>
                     );
@@ -625,1636 +870,458 @@ const AwardDetailModal = ({ award, onClose, onApply, userRole, mode }) => {
                                             {rules.basic?.qslRequired && <div className="text-green-600 font-bold">✅ 需要 QSL 确认</div>}
                                             {rules.filters?.length > 0 ? (
                                                 rules.filters.map((f, i) => (
-                                                    <div key={i} className="flex gap-2"><span className="font-mono bg-white px-1 border rounded text-xs">{f.field}</span> {f.operator} <b>{f.value}</b></div>
+                                                    <div key={i} className="mt-2">
+                                                        <div className="font-bold text-slate-700">条件 {i+1}</div>
+                                                        {f.bands && <div>• 波段: {f.bands.join(', ')}</div>}
+                                                        {f.modes && <div>• 模式: {f.modes.join(', ')}</div>}
+                                                    </div>
                                                 ))
-                                            ) : <div className="text-slate-400 text-xs">无特殊筛选条件</div>}
+                                            ) : null}
+                                            {rules.thresholds?.length > 0 && (
+                                                <div className="mt-4">
+                                                    <div className="font-bold text-slate-700 mb-2">等级要求</div>
+                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                                                        {rules.thresholds.map((t, i) => (
+                                                            <div key={i} className="p-2 rounded-lg" style={{backgroundColor: t.color + '20', borderLeft: `4px solid ${t.color}`}}>
+                                                                <div className="font-bold">{t.name}</div>
+                                                                <div className="text-xs text-slate-600">{t.count} 个有效通联</div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
                                         </>
                                     ) : (
-                                        (Array.isArray(award.rules) ? award.rules : []).map((rule, i) => (
-                                            <div key={i} className="flex items-center gap-2">
-                                                <CheckCircle size={14} className="text-green-500"/>
-                                                <span><span className="font-mono bg-white px-1 border rounded">{rule.field}</span> {rule.operator} <span className="font-bold">{rule.value}</span></span>
-                                            </div>
-                                        ))
+                                        <>
+                                            {rules.bands && <div>• 波段: {rules.bands.join(', ')}</div>}
+                                            {rules.modes && <div>• 模式: {rules.modes.join(', ')}</div>}
+                                            {rules.count && <div>• 需通联: {rules.count} 个不同实体</div>}
+                                            {rules.dxccs && <div>• 特定 DXCC: {rules.dxccs.length} 个</div>}
+                                            {rules.callsigns && <div>• 特定呼号: {rules.callsigns.length} 个</div>}
+                                            {rules.grid && <div>• 网格要求: {rules.grid}</div>}
+                                            {rules.state && <div>• 州: {rules.state}</div>}
+                                            {rules.iota && <div>• IOTA: {rules.iota}</div>}
+                                            {rules.startDate && <div>• 开始日期: {rules.startDate}</div>}
+                                            {rules.endDate && <div>• 结束日期: {rules.endDate}</div>}
+                                            {rules.qslRequired && <div className="text-green-600 font-bold">✅ 需要 QSL 确认</div>}
+                                        </>
                                     )}
                                 </div>
                             </div>
 
-                            {/* Logic & Targets */}
-                            {hasComplexRules && (
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Calculator size={14}/> 计分模式</h4>
-                                        <div className="bg-slate-50 p-3 rounded-lg border text-sm">
-                                            <div className="font-bold text-slate-700 mb-1">{rules.logic === 'collection' ? '📦 收集型 (计数)' : '🔢 计分型 (累计)'}</div>
-                                            <div className="text-xs text-slate-500">目标: {rules.targets?.type?.toUpperCase() || '任意 QSO'}</div>
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Trophy size={14}/> 等级要求</h4>
-                                        <div className="bg-slate-50 p-3 rounded-lg border text-sm space-y-1">
-                                            {(rules.thresholds || [{value:0, name:'Basic'}]).map((t,i) => (
-                                                <div key={i} className="flex justify-between text-xs">
-                                                    <span>{t.name}</span>
-                                                    <span className="font-bold">
-                                                        {t.value} {t.fullCollection ? '+ Full' : ''}
-                                                    </span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Real-time Check Result Area */}
+                            {/* Eligibility Check */}
                             {userRole === 'user' && (
-                                <div className="mt-4 pt-4 border-t">
-                                    <div className="flex justify-between items-center mb-3">
-                                        <h4 className="font-bold text-sm text-slate-500 uppercase flex items-center gap-2">
-                                            <Activity size={14}/> 您的进度
-                                            {checking && <span className="text-xs font-normal text-blue-600 animate-pulse ml-2">正在分析日志...</span>}
-                                        </h4>
-                                        <button onClick={handleLoadMatrix} className="text-xs bg-blue-50 text-blue-600 px-3 py-1 rounded-full font-bold hover:bg-blue-100 flex items-center gap-1">
-                                            <Grid size={12}/> 查看日志匹配详情
-                                        </button>
-                                    </div>
-                                    
-                                    {checkResult ? (
-                                        <div className={`rounded-xl p-5 border-2 space-y-4 ${checkResult.eligible ? 'bg-green-50 border-green-200' : 'bg-slate-50 border-slate-200'}`}>
-                                            <div>
-                                                <div className="flex justify-between items-center mb-2">
-                                                    <span className="text-sm font-bold text-slate-500">当前累计</span>
-                                                    <span className="text-2xl font-black">{checkResult.current_score} <span className="text-sm text-slate-400 font-normal">/ {checkResult.target_score}</span></span>
+                                <div>
+                                    <h4 className="font-bold text-sm text-slate-500 mb-2 uppercase flex items-center gap-2"><Target size={14}/> 资格检查</h4>
+                                    {checking ? (
+                                        <div className="p-8 text-center text-slate-400">
+                                            <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                                            检查中...
+                                        </div>
+                                    ) : checkResult?.error ? (
+                                        <div className="p-4 text-red-500 bg-red-50 rounded-lg border border-red-200">
+                                            ❌ {checkResult.error}
+                                        </div>
+                                    ) : checkResult ? (
+                                        <div className="space-y-4">
+                                            <div className={`p-4 rounded-lg border ${checkResult.eligible ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+                                                <div className="font-bold mb-2">
+                                                    {checkResult.eligible ? '✅ 恭喜！您已具备申领资格' : '❌ 抱歉，您尚未满足要求'}
                                                 </div>
-                                                {/* Progress Bar */}
-                                                <div className="w-full bg-slate-200 rounded-full h-3 mb-3 overflow-hidden">
-                                                    <div 
-                                                        className={`h-full transition-all duration-1000 ${checkResult.eligible ? 'bg-green-500' : 'bg-blue-500'}`} 
-                                                        style={{width: `${Math.min(100, (checkResult.current_score / checkResult.target_score) * 100)}%`}}
-                                                    ></div>
-                                                </div>
-                                                <div className="flex justify-between items-center">
-                                                    <div className="text-xs text-slate-500 font-bold">
-                                                        {checkResult.details?.msg}
-                                                    </div>
-                                                    {checkResult.eligible && <div className="px-2 py-1 bg-green-200 text-green-800 text-xs font-bold rounded flex items-center gap-1"><Check size={12}/> 已达成: {checkResult.achieved_level?.name}</div>}
+                                                <div className="text-sm">
+                                                    已完成: {checkResult.achieved}/{checkResult.required} ({Math.round((checkResult.achieved/checkResult.required)*100)}%)
                                                 </div>
                                             </div>
-
-                                            {/* Detailed Target Breakdown */}
-                                            {checkResult.breakdown && (
-                                                <div className="bg-white rounded-lg p-3 border text-xs">
-                                                    <div className="font-bold mb-2 flex justify-between">
-                                                        <span>特定目标完成度 ({checkResult.breakdown.achieved.length}/{checkResult.breakdown.total_required})</span>
-                                                    </div>
-                                                    <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto">
-                                                        <div>
-                                                            <div className="text-green-600 font-bold mb-1">已完成</div>
-                                                            <div className="flex flex-wrap gap-1">
-                                                                {checkResult.breakdown.achieved.map(t => (
-                                                                    <span key={t.target} className="bg-green-100 text-green-700 px-1 rounded">{t.target}</span>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                        <div>
-                                                            <div className="text-red-400 font-bold mb-1">未完成</div>
-                                                            <div className="flex flex-wrap gap-1">
-                                                                {checkResult.breakdown.missing.map(t => (
-                                                                    <span key={t} className="bg-slate-100 text-slate-400 px-1 rounded">{t}</span>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
+                                            {checkResult.matching_qsos && (
+                                                <button 
+                                                    onClick={handleLoadMatrix}
+                                                    className="w-full py-2 bg-blue-50 text-blue-600 rounded-lg font-medium hover:bg-blue-100 transition-colors"
+                                                >
+                                                    查看详细匹配日志
+                                                </button>
                                             )}
-
-                                            {/* Multi-level Claim Info */}
-                                            {checkResult.claimed_levels?.length > 0 && (
-                                                <div className="mt-2 text-xs text-slate-400 border-t pt-2">
-                                                    已领取: {checkResult.claimed_levels.join(', ')}
-                                                </div>
+                                            {checkResult.eligible && !mode && onApply && (
+                                                <button 
+                                                    onClick={handleApplyClick}
+                                                    disabled={applying}
+                                                    className="w-full py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 transition-colors"
+                                                >
+                                                    {applying ? '申领中...' : '立即申领奖状'}
+                                                </button>
                                             )}
                                         </div>
                                     ) : (
-                                        <div className="text-center py-6 text-slate-400 text-sm bg-slate-50 rounded-xl border border-dashed">
-                                            日志分析未就绪或出现错误
-                                        </div>
+                                        <button 
+                                            onClick={() => checkEligibility()}
+                                            className="w-full py-3 bg-slate-900 text-white rounded-lg font-bold hover:bg-slate-800 transition-colors"
+                                        >
+                                            检查资格
+                                        </button>
                                     )}
                                 </div>
                             )}
                         </div>
                     )}
-
-                    <div className="mt-6">
-                        {mode === 'view_only' ? (
-                            <div className="text-center text-slate-400 text-sm bg-slate-50 p-3 rounded-lg border">
-                                已颁发奖状查看模式
-                            </div>
-                        ) : (
-                            userRole === 'user' ? (
-                                <button 
-                                    onClick={handleApplyClick} 
-                                    disabled={!checkResult?.eligible || applying || checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name)}
-                                    className={`w-full py-4 rounded-xl font-bold shadow-lg transition-all flex items-center justify-center gap-2 ${
-                                        checkResult?.eligible && !checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name)
-                                        ? 'bg-green-600 hover:bg-green-700 text-white shadow-green-200 active:scale-95' 
-                                        : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
-                                    }`}
-                                >
-                                    {applying ? '正在提交...' 
-                                        : checkResult?.claimed_levels?.includes(checkResult?.achieved_level?.name) 
-                                            ? `已领取当前等级 (${checkResult.achieved_level.name})`
-                                            : checkResult?.eligible 
-                                                ? `申领 ${checkResult.achieved_level.name} 奖状` 
-                                                : '条件未满足，无法申领'}
-                                </button>
-                            ) : (
-                                <div className="text-center text-slate-400 text-sm bg-slate-50 p-3 rounded-lg border">
-                                    {userRole === 'admin' ? '管理员模式 - 仅供预览' : '仅普通用户可申领'}
-                                </div>
-                            )
-                        )}
-                    </div>
                 </div>
             </div>
         </div>
     );
 };
 
-// 1. Award Center View (All Approved Awards)
-const AwardCenterView = ({ user }) => {
-    const [awards, setAwards] = useState([]);
-    const [selectedAward, setSelectedAward] = useState(null);
+// Main App Component
+function App() {
+    const [user, setUser] = useState(null);
+    const [subView, setSubView] = useState('dashboard');
+    const [expandedMenus, setExpandedMenus] = useState({});
+    const [authMode, setAuthMode] = useState('login');
+    const [show2FAInput, setShow2FAInput] = useState(false);
+    const [isInstalled, setIsInstalled] = useState(true);
 
+    // Check if installed on load
     useEffect(() => {
-        apiFetch('/awards/all_approved').then(setAwards).catch(console.error);
+        fetch('/api/installed')
+            .then(res => res.json())
+            .then(data => {
+                setIsInstalled(data.installed);
+            })
+            .catch(() => {
+                setIsInstalled(false);
+            });
     }, []);
 
-    const handleApply = (award) => {
-        // Only called if passed to Modal, but logic moved inside Modal now
-        setSelectedAward(null);
-    };
-
-    return (
-        <div className="space-y-6">
-            <h3 className="text-xl font-bold flex items-center gap-2"><Award className="text-orange-500"/> 奖状大厅 (Award Center)</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {awards.map(aw => (
-                    <div 
-                        key={aw.id} 
-                        onClick={() => setSelectedAward(aw)}
-                        className={`bg-white rounded-2xl shadow-sm border overflow-hidden hover:shadow-md transition-shadow group cursor-pointer`}
-                    >
-                        <div className="h-48 bg-slate-200 bg-cover bg-center relative" style={{backgroundImage: `url(${aw.bg_url})`}}>
-                            <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                <span className="text-white font-bold border-2 border-white px-4 py-2 rounded-full">查看详情与进度</span>
-                            </div>
-                        </div>
-                        <div className="p-6">
-                            <h4 className="font-bold text-lg mb-2 group-hover:text-blue-600 transition-colors">{aw.name}</h4>
-                            <p className="text-slate-500 text-sm line-clamp-2">{aw.description}</p>
-                            <div className="mt-4 pt-4 border-t flex justify-between items-center text-xs text-slate-400">
-                                <span>ID: {aw.tracking_id}</span>
-                                <span className="text-green-600 font-bold bg-green-50 px-2 py-1 rounded">详情</span>
-                            </div>
-                        </div>
-                    </div>
-                ))}
-            </div>
-            {selectedAward && <AwardDetailModal award={selectedAward} onClose={() => setSelectedAward(null)} onApply={handleApply} userRole={user.role} />}
-        </div>
-    );
-};
-
-// 2. Award Admin Manager (Refactored: Accepts viewMode prop to handle specific section)
-const AwardAdminManager = ({ viewMode }) => {
-    // viewMode: 'create', 'drafts', 'returned', 'audit_list'
-    
-    // Internal state mapping for drafts logic
-    const isReturnedMode = viewMode === 'returned';
-    
-    const [drafts, setDrafts] = useState([]);
-    const [auditList, setAuditList] = useState([]);
-    const [editingAward, setEditingAward] = useState(null); 
-    const [timelineModal, setTimelineModal] = useState(null); 
-    
-    // Initial check for create mode
+    // Check user session
     useEffect(() => {
-        if (viewMode === 'create') {
-            setEditingAward({});
-        } else {
-            setEditingAward(null);
+        const savedUser = localStorage.getItem('ham_user');
+        if (savedUser) {
+            try {
+                setUser(JSON.parse(savedUser));
+            } catch (e) {
+                console.error('Failed to parse user data:', e);
+                localStorage.removeItem('ham_user');
+                localStorage.removeItem('ham_token');
+            }
         }
-    }, [viewMode]);
+    }, []);
 
-    const loadData = async () => {
-        // Load content based on viewMode
-        if (viewMode === 'drafts' || viewMode === 'returned') {
-            const status = isReturnedMode ? 'returned' : 'drafts';
-            apiFetch(`/awards/my?status=${status}`).then(setDrafts);
-        }
-        if (viewMode === 'audit_list') apiFetch('/awards/my?status=audit_list').then(setAuditList);
-    };
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData);
 
-    useEffect(() => { loadData(); }, [viewMode]);
-
-    const handleDelete = async (id) => {
-        if(!confirm('确定删除此记录吗？')) return;
         try {
-            await apiFetch(`/awards/${id}`, { method: 'DELETE' });
-            loadData();
-        } catch(e) { alert(e.message); }
+            const res = await apiFetch('/auth/login', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+
+            if (res.requires_2fa) {
+                setShow2FAInput(true);
+                return;
+            }
+
+            localStorage.setItem('ham_token', res.token);
+            localStorage.setItem('ham_user', JSON.stringify(res.user));
+            setUser(res.user);
+            setSubView('dashboard');
+        } catch (err) {
+            alert(err.message);
+        }
     };
 
-    const renderTimeline = () => {
-        if (!timelineModal) return null;
-        const logs = timelineModal.audit_log || [];
+    const handleRegister = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData);
+
+        if (data.password !== data.confirmPassword) {
+            alert('两次输入的密码不一致');
+            return;
+        }
+
+        try {
+            const res = await apiFetch('/auth/register', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+
+            alert('注册成功！请登录');
+            setAuthMode('login');
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+
+    const handleLogout = () => {
+        localStorage.removeItem('ham_token');
+        localStorage.removeItem('ham_user');
+        setUser(null);
+        setSubView('dashboard');
+    };
+
+    const handleInstallComplete = () => {
+        window.location.reload();
+    };
+
+    const toggleMenu = (menuId) => {
+        setExpandedMenus(prev => ({
+            ...prev,
+            [menuId]: !prev[menuId]
+        }));
+    };
+
+    const handleMenuClick = (item) => {
+        setSubView(item.id);
+        if (item.parent) {
+            setExpandedMenus(prev => ({
+                ...prev,
+                [item.parent]: true
+            }));
+        }
+    };
+
+    const getNavItems = (role) => {
+        const baseItems = [
+            { id: 'dashboard', label: '仪表盘', icon: Activity },
+            { id: 'awards', label: '奖状大厅', icon: Award },
+            { id: 'my-awards', label: '我的奖状', icon: Trophy },
+            { id: 'logbook', label: '日志上传', icon: FileText }
+        ];
+
+        if (role === 'admin') {
+            return [
+                ...baseItems,
+                {
+                    id: 'admin',
+                    label: '管理中心',
+                    icon: Shield,
+                    children: [
+                        { id: 'users', label: '用户管理', icon: Users, parent: 'admin' },
+                        { id: 'awards-admin', label: '奖状管理', icon: Award, parent: 'admin' },
+                        { id: 'audit-awards', label: '审核奖状', icon: CheckCircle, parent: 'admin' },
+                        { id: 'create-award', label: '创建奖状', icon: FilePlus, parent: 'admin' },
+                        { id: 'system', label: '系统设置', icon: Settings, parent: 'admin' },
+                        { id: 'notifications', label: '通知中心', icon: Bell, parent: 'admin' }
+                    ]
+                }
+            ];
+        } else if (role === 'award_admin') {
+            return [
+                ...baseItems,
+                {
+                    id: 'admin',
+                    label: '管理中心',
+                    icon: Shield,
+                    children: [
+                        { id: 'awards-admin', label: '奖状管理', icon: Award, parent: 'admin' },
+                        { id: 'audit-awards', label: '审核奖状', icon: CheckCircle, parent: 'admin' },
+                        { id: 'create-award', label: '创建奖状', icon: FilePlus, parent: 'admin' }
+                    ]
+                }
+            ];
+        }
+
+        return baseItems;
+    };
+
+    const renderSubView = () => {
+        switch (subView) {
+            case 'dashboard':
+                return <DashboardView user={user} />;
+            case 'my-awards':
+                return <MyAwardsView user={user} />;
+            default:
+                return <div className="p-8 text-center text-slate-400">页面开发中...</div>;
+        }
+    };
+
+    // Render Install View if not installed
+    if (!isInstalled) {
+        return <InstallView onComplete={handleInstallComplete} />;
+    }
+
+    // Render Login View if no user
+    if (!user) {
         return (
-            <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4">
-                <div className="bg-white rounded-2xl w-full max-w-lg p-6 max-h-[80vh] overflow-y-auto">
-                    <div className="flex justify-between items-center mb-6">
-                        <h3 className="font-bold text-lg">审核进度详情 - {timelineModal.tracking_id}</h3>
-                        <button onClick={()=>setTimelineModal(null)}><X/></button>
+            <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+                    <div className="bg-slate-900 p-8 text-white">
+                        <h1 className="text-2xl font-bold flex items-center gap-3">
+                            <Shield className="text-blue-500" /> HAM AWARDS
+                        </h1>
+                        <p className="text-slate-400 text-sm mt-2">登录系统</p>
                     </div>
-                    <div className="relative border-l-2 border-slate-200 ml-3 space-y-8">
-                        {logs.map((log, idx) => (
-                            <div key={idx} className="relative pl-8">
-                                <div className={`absolute -left-[9px] top-0 w-4 h-4 rounded-full border-2 border-white ${
-                                    log.action === 'approved' ? 'bg-green-500' :
-                                    log.action === 'returned' || log.action.includes('reject') ? 'bg-red-500' :
-                                    'bg-blue-500'
-                                }`}></div>
-                                <div className="text-sm text-slate-400 mb-1">{new Date(log.time).toLocaleString()}</div>
-                                <div className="font-bold text-slate-800">{
-                                    log.action === 'submitted' ? '提交审核' : 
-                                    log.action === 'approved' ? '审核通过' : 
-                                    log.action === 'returned' ? '被退回' : 
-                                    log.action === 'saved_draft' ? '保存草稿' : log.action
-                                }</div>
-                                <div className="text-sm text-slate-600">操作人: {log.actor}</div>
-                                {log.reason && <div className="mt-2 p-2 bg-red-50 text-red-700 text-sm rounded border border-red-100">原因: {log.reason}</div>}
-                            </div>
-                        ))}
+                    <div className="p-8">
+                        {/* Auth Mode Toggle */}
+                        <div className="flex border rounded-lg overflow-hidden mb-6">
+                            <button onClick={()=>setAuthMode('login')} className={`flex-1 py-4 font-bold text-sm ${authMode==='login'?'text-blue-600 bg-blue-50/50':'text-slate-400'}`}>登录</button>
+                            <button onClick={()=>setAuthMode('register')} className={`flex-1 py-4 font-bold text-sm ${authMode==='register'?'text-blue-600 bg-blue-50/50':'text-slate-400'}`}>注册</button>
+                        </div>
+                        {/* Login Form */}
+                        {authMode === 'login' && (
+                            <form onSubmit={handleLogin}>
+                                {show2FAInput ? (
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="block text-sm font-bold text-slate-700 mb-2">两步验证码</label>
+                                            <input type="text" name="code" required className="w-full border rounded-lg p-3" placeholder="请输入验证码" />
+                                        </div>
+                                        <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-colors">
+                                            验证
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        <div>
+                                            <label className="block text-sm font-bold text-slate-700 mb-2">呼号</label>
+                                            <input type="text" name="callsign" required className="w-full border rounded-lg p-3" placeholder="请输入呼号" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-slate-700 mb-2">密码</label>
+                                            <input type="password" name="password" required className="w-full border rounded-lg p-3" placeholder="请输入密码" />
+                                        </div>
+                                        <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-colors">
+                                            登录
+                                        </button>
+                                    </div>
+                                )}
+                            </form>
+                        )}
+                        {/* Register Form */}
+                        {authMode === 'register' && (
+                            <form onSubmit={handleRegister}>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">呼号</label>
+                                        <input type="text" name="callsign" required className="w-full border rounded-lg p-3" placeholder="请输入呼号" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">密码</label>
+                                        <input type="password" name="password" required className="w-full border rounded-lg p-3" placeholder="请输入密码" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 mb-2">确认密码</label>
+                                        <input type="password" name="confirmPassword" required className="w-full border rounded-lg p-3" placeholder="请再次输入密码" />
+                                    </div>
+                                    <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 transition-colors">
+                                        注册
+                                    </button>
+                                </div>
+                            </form>
+                        )}
                     </div>
                 </div>
             </div>
         );
-    };
+    }
 
     return (
-        <div className="space-y-6">
-            {/* Header Title based on View Mode */}
-            <h3 className="text-xl font-bold flex items-center gap-2">
-                {viewMode === 'create' && <><Plus className="text-blue-500"/> 新建奖状 (New Award)</>}
-                {viewMode === 'drafts' && <><FileText className="text-orange-500"/> 我的草稿 (My Drafts)</>}
-                {viewMode === 'returned' && <><FileWarning className="text-red-500"/> 打回草稿 (Returned)</>}
-                {viewMode === 'audit_list' && <><List className="text-purple-500"/> 审核列表 (Audit List)</>}
-            </h3>
-
-            <div className="bg-white rounded-2xl shadow-sm border p-6 min-h-[400px]">
-                {viewMode === 'create' && (
-                    <div className="text-center py-10">
-                        {editingAward ? (
-                            <div className="text-slate-500">正在打开编辑器...</div>
-                        ) : (
-                            <>
-                                <div className="mb-4 text-slate-400">点击下方按钮开始设计新奖状</div>
-                                <button onClick={()=>setEditingAward({})} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 mx-auto hover:bg-blue-700 transition-colors">
-                                    <Plus size={20}/> 创建新奖状
-                                </button>
-                            </>
-                        )}
-                    </div>
-                )}
-
-                {(viewMode === 'drafts' || viewMode === 'returned') && (
-                    <div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                            {drafts.length === 0 && <div className="col-span-full text-center text-slate-400 py-10">空空如也</div>}
-                            {drafts.map(d => (
-                                <div key={d.id} className="border rounded-xl overflow-hidden hover:border-blue-300 transition-colors group">
-                                    <div className="h-32 bg-slate-100 bg-cover bg-center relative" style={{backgroundImage: `url(${d.bg_url})`}}>
-                                        {isReturnedMode && <div className="absolute top-2 right-2 bg-red-500 text-white text-xs px-2 py-1 rounded font-bold">已退回</div>}
-                                    </div>
-                                    <div className="p-4">
-                                        <h4 className="font-bold mb-1">{d.name || '未命名奖状'}</h4>
-                                        {isReturnedMode && d.reject_reason && (
-                                            <div className="text-xs text-red-600 bg-red-50 p-2 rounded mb-2">原因: {d.reject_reason}</div>
-                                        )}
-                                        <div className="flex gap-2 mt-4">
-                                            <button onClick={()=>setEditingAward(d)} className="flex-1 bg-slate-900 text-white py-2 rounded-lg text-sm font-bold">编辑/重交</button>
-                                            <button onClick={()=>handleDelete(d.id)} className="p-2 text-red-400 hover:bg-red-50 rounded-lg"><Trash2 size={16}/></button>
-                                        </div>
-                                    </div>
-                                </div>
-                            ))}
+        <div className="min-h-screen bg-slate-50 flex">
+            {/* Sidebar */}
+            <aside className="w-64 bg-white shadow-sm border-r border-slate-200 flex flex-col">
+                <div className="p-6 border-b border-slate-100">
+                    <div className="flex items-center gap-2">
+                        <div className="p-2 bg-slate-900 text-white rounded-lg">
+                            <Radio size={20} />
                         </div>
-                    </div>
-                )}
-
-                {viewMode === 'audit_list' && (
-                    <table className="w-full text-left">
-                        <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-bold">
-                            <tr><th className="p-4">追踪码</th><th className="p-4">奖状名称</th><th className="p-4">提交时间</th><th className="p-4">当前状态</th><th className="p-4">操作</th></tr>
-                        </thead>
-                        <tbody className="divide-y">
-                            {auditList.map(item => (
-                                <tr key={item.id}>
-                                    <td className="p-4 font-mono text-xs">{item.tracking_id}</td>
-                                    <td className="p-4 font-bold">{item.name}</td>
-                                    <td className="p-4 text-sm text-slate-500">{new Date(item.created_at).toLocaleDateString()}</td>
-                                    <td className="p-4">
-                                        <span className={`px-2 py-1 rounded text-xs font-bold ${
-                                            item.status === 'approved' ? 'bg-green-100 text-green-700' :
-                                            item.status === 'returned' ? 'bg-red-100 text-red-700' :
-                                            'bg-blue-100 text-blue-700'
-                                        }`}>
-                                            {item.status === 'approved' ? '已通过' : item.status === 'returned' ? '已退回' : '审核中'}
-                                        </span>
-                                    </td>
-                                    <td className="p-4">
-                                        <button onClick={()=>setTimelineModal(item)} className="text-blue-600 hover:underline text-sm font-bold">查看详情</button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                )}
-            </div>
-
-            {editingAward && <AwardDesigner initData={editingAward} onClose={()=>{setEditingAward(null); loadData();}} />}
-            {timelineModal && renderTimeline()}
-        </div>
-    );
-};
-
-// 3. System Admin Award Manager (Refactored: Accepts viewMode prop)
-const SystemAdminAwardManager = ({ viewMode }) => {
-    // viewMode: 'audit' or 'overview'
-    
-    const [list, setList] = useState([]);
-    const [actionModal, setActionModal] = useState(null); 
-    const [reason, setReason] = useState('');
-    const [detailModal, setDetailModal] = useState(null); 
-    
-    const load = () => {
-        const url = viewMode === 'audit' ? '/admin/awards/pending' : '/admin/awards/approved';
-        apiFetch(url).then(setList).catch(console.error);
-    };
-
-    useEffect(() => { load(); }, [viewMode]);
-
-    const handleAction = async () => {
-        try {
-            await apiFetch('/admin/awards/audit', {
-                method: 'POST',
-                body: JSON.stringify({ id: actionModal.id, action: actionModal.action, reason })
-            });
-            alert('操作成功');
-            setActionModal(null); setReason(''); load();
-        } catch(e) { alert(e.message); }
-    };
-
-    return (
-        <div className="space-y-6">
-            {/* Title */}
-            <h3 className="text-xl font-bold flex items-center gap-2">
-                {viewMode === 'audit' ? <><CheckCircle className="text-blue-500"/> 奖状审核 (Award Audit)</> : <><Layout className="text-purple-500"/> 奖状总览 (Award Overview)</>}
-            </h3>
-
-            {/* Content Table */}
-            <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
-                <table className="w-full text-left">
-                    <thead className="bg-slate-50 border-b">
-                        <tr>
-                            <th className="p-4">ID</th><th className="p-4">名称</th><th className="p-4">提交人</th><th className="p-4">提交时间</th><th className="p-4 w-48">操作</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                        {list.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-slate-400">暂无数据</td></tr>}
-                        {list.map(item => (
-                            <tr key={item.id}>
-                                <td className="p-4 text-xs font-mono">{item.tracking_id || item.id}</td>
-                                <td className="p-4 font-bold">{item.name}</td>
-                                <td className="p-4 text-sm">{item.creator_call}</td>
-                                <td className="p-4 text-sm text-slate-500">{new Date(item.created_at).toLocaleDateString()}</td>
-                                <td className="p-4 flex gap-2">
-                                    <button onClick={()=>setDetailModal(item)} className="p-2 bg-slate-100 text-slate-600 rounded hover:bg-slate-200" title="查看详情"><Eye size={16}/></button>
-                                    {viewMode === 'audit' ? (
-                                        <>
-                                            <button onClick={()=>apiFetch('/admin/awards/audit', {method:'POST', body:JSON.stringify({id:item.id, action:'approve'})}).then(()=>{alert('已通过');load()})} className="px-3 py-1 bg-green-100 text-green-700 rounded font-bold text-sm">通过</button>
-                                            <button onClick={()=>setActionModal({id:item.id, action:'reject', title:'打回申请'})} className="px-3 py-1 bg-red-100 text-red-700 rounded font-bold text-sm">打回</button>
-                                        </>
-                                    ) : (
-                                        <button onClick={()=>setActionModal({id:item.id, action:'recall', title:'撤回奖状'})} className="px-3 py-1 bg-orange-100 text-orange-700 rounded font-bold text-sm flex items-center gap-1"><RotateCcw size={14}/> 撤回/打回</button>
-                                    )}
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
-
-            {actionModal && (
-                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl p-6 w-full max-w-md space-y-4">
-                        <h3 className="font-bold text-lg">{actionModal.title}</h3>
-                        <textarea className="w-full border rounded-lg p-3 h-32" placeholder="请输入原因 (必填)" value={reason} onChange={e=>setReason(e.target.value)}></textarea>
-                        <div className="flex gap-2">
-                            <button onClick={()=>setActionModal(null)} className="flex-1 bg-slate-100 py-2 rounded-lg font-bold">取消</button>
-                            <button onClick={handleAction} className="flex-1 bg-red-600 text-white py-2 rounded-lg font-bold">确认执行</button>
+                        <div>
+                            <h1 className="font-bold text-lg">HAM AWARDS</h1>
+                            <p className="text-xs text-slate-500">{user.callsign}</p>
                         </div>
                     </div>
                 </div>
-            )}
-            
-            {detailModal && (
-                <AwardDetailModal 
-                    award={detailModal} 
-                    onClose={()=>setDetailModal(null)} 
-                    userRole="admin" 
-                />
-            )}
-        </div>
-    );
-};
 
-// New Standalone Component for Issuance Management (3. Requirement)
-const IssuanceManager = () => {
-    const [issuanceList, setIssuanceList] = useState([]);
-
-    const load = () => {
-        apiFetch('/admin/issued-awards').then(setIssuanceList).catch(console.error);
-    };
-
-    useEffect(() => { load(); }, []);
-
-    const handleDeleteIssuance = async (id) => {
-        if(!confirm('确定要撤销并删除该颁发记录吗？')) return;
-        try {
-            await apiFetch(`/admin/issued-awards/${id}`, { method: 'DELETE' });
-            alert('删除成功');
-            load();
-        } catch(e) { alert(e.message); }
-    };
-
-    return (
-        <div className="space-y-6">
-            <h3 className="text-xl font-bold flex items-center gap-2"><Trophy className="text-orange-500"/> 颁发管理 (Issuance Management)</h3>
-            <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
-                <table className="w-full text-left">
-                    <thead className="bg-slate-50 border-b">
-                        <tr>
-                            <th className="p-4">颁发ID</th><th className="p-4">奖状名称</th><th className="p-4">序列号</th><th className="p-4">申请时间</th><th className="p-4">申请人</th><th className="p-4">等级</th><th className="p-4">操作</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                        {issuanceList.length === 0 && <tr><td colSpan="7" className="p-8 text-center text-slate-400">暂无颁发记录</td></tr>}
-                        {issuanceList.map(item => (
-                            <tr key={item.id}>
-                                <td className="p-4 text-xs font-mono">{item.id}</td>
-                                <td className="p-4 font-bold">{item.award_name} <span className="text-xs text-slate-400">({item.tracking_id})</span></td>
-                                <td className="p-4 font-mono text-sm">{item.serial_number}</td>
-                                <td className="p-4 text-sm text-slate-500">{new Date(item.issued_at).toLocaleString()}</td>
-                                <td className="p-4 font-bold text-blue-600">{item.applicant_call}</td>
-                                <td className="p-4"><span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs font-bold">{item.level}</span></td>
-                                <td className="p-4">
-                                    <button onClick={()=>handleDeleteIssuance(item.id)} className="p-2 bg-red-50 text-red-600 rounded hover:bg-red-100 text-xs font-bold flex items-center gap-1"><Trash2 size={14}/> 删除颁发</button>
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    );
-};
-
-// 4. Award Designer (Updated for Full Collection Checkbox)
-const AwardDesigner = ({ initData, onClose }) => {
-    // Basic UI States
-    const [step, setStep] = useState(1);
-    const [bgUrl, setBgUrl] = useState(initData?.bg_url || '');
-    // Removed layout state as we only crop now
-    
-    // Image Cropper States
-    const [uploadedImage, setUploadedImage] = useState(null); // The raw file as Image Object
-    const [cropState, setCropState] = useState({ scale: 1, x: 0, y: 0 });
-    const canvasRef = useRef(null);
-
-    // Initial Rule Structure (Complex V2)
-    const defaultRules = {
-        v2: true, // Marker for new rule system
-        basic: { startDate: '', endDate: '', qslRequired: true }, // 2. Default QSL Required to true
-        filters: [], // [{ field, operator, value }]
-        logic: 'collection', // 'collection' or 'points'
-        targets: { type: 'any', list: '' }, // type: any, callsign, dxcc, grid, etc.
-        scoring: { cw: 1, phone: 1, data: 1, multis: [] },
-        deduplication: 'none', // none, call, call_band, qso, state, custom
-        deduplicationCustomField: '',
-        thresholds: [{ name: 'Award', value: 1, color: '#eab308', fullCollection: false }]
-    };
-
-    // Migrate old rules or use init
-    const [rules, setRules] = useState(() => {
-        if (!initData?.rules) return defaultRules;
-        if (Array.isArray(initData.rules)) return { ...defaultRules, filters: initData.rules }; // Migrate V1
-        return { ...defaultRules, ...initData.rules };
-    });
-
-    const [meta, setMeta] = useState({ name: initData?.name || '', description: initData?.description || '' });
-
-    // Handle initial image load for cropping
-    const handleFileSelect = (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-            const img = new Image();
-            img.onload = () => {
-                setUploadedImage(img);
-                // Reset crop
-                setCropState({ scale: 1, x: 0, y: 0 });
-            };
-            img.src = evt.target.result;
-        };
-        reader.readAsDataURL(file);
-    };
-
-    const generateCroppedImage = async () => {
-        return new Promise((resolve, reject) => {
-            if (!uploadedImage) {
-                 resolve(null); 
-                 return;
-            }
-
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            canvas.width = 800; // Fixed output width
-            canvas.height = 600; // Fixed output height
-
-            // Fill white background
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            ctx.translate(cropState.x, cropState.y);
-            ctx.scale(cropState.scale, cropState.scale);
-            ctx.drawImage(uploadedImage, 0, 0);
-
-            canvas.toBlob((blob) => {
-                if (blob) resolve(blob);
-                else reject(new Error('Canvas blob failed'));
-            }, 'image/jpeg', 0.9);
-        });
-    };
-
-    const saveAward = async (status) => {
-        try {
-            // Validation
-            if (!meta.name) throw new Error("请输入奖状名称");
-            
-            let finalBgUrl = bgUrl;
-
-            // Process image if new one uploaded
-            if (uploadedImage) {
-                const blob = await generateCroppedImage();
-                if (blob) {
-                    const fd = new FormData();
-                    fd.append('bg', blob, 'award_bg.jpg');
-                    const uploadRes = await apiFetch('/awards/upload-bg', { method: 'POST', body: fd });
-                    finalBgUrl = uploadRes.url;
-                }
-            }
-
-            if (!finalBgUrl) throw new Error("请上传并设置奖状底图");
-
-            await apiFetch('/awards', {
-                method: 'POST',
-                body: JSON.stringify({ 
-                    id: initData?.id,
-                    name: meta.name, 
-                    description: meta.description, 
-                    bg_url: finalBgUrl, 
-                    rules, 
-                    layout: [], // No longer used, cleared
-                    status 
-                })
-            });
-            alert(status === 'draft' ? '草稿已保存' : '已提交审核');
-            onClose();
-        } catch(err) { alert(err.message); }
-    };
-
-    // Steps Configuration
-    const steps = [
-        { id: 1, label: '基本信息', icon: Info },
-        { id: 2, label: '规则配置', icon: Settings },
-        { id: 3, label: '视觉设计', icon: Crop } 
-    ];
-
-    const hasSpecificTargets = rules.targets.type !== 'any';
-
-    return (
-        <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-6xl h-[90vh] rounded-2xl flex flex-col overflow-hidden">
-                {/* Header */}
-                <div className="p-4 border-b flex justify-between items-center bg-slate-100">
-                    <div className="flex items-center gap-4">
-                        <h2 className="font-bold text-lg">{initData?.id ? '编辑奖状' : '新建奖状'}</h2>
-                        <div className="flex bg-white rounded-lg p-1 border">
-                            {steps.map(s => (
-                                <button key={s.id} onClick={()=>setStep(s.id)} className={`flex items-center gap-2 px-3 py-1 rounded text-sm transition-all ${step===s.id ? 'bg-slate-900 text-white shadow' : 'text-slate-500 hover:bg-slate-50'}`}>
-                                    <s.icon size={14}/> {s.label}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                    <button onClick={onClose}><X /></button>
-                </div>
-
-                <div className="flex-1 flex overflow-hidden">
-                    {/* Step 1: Basic Info */}
-                    {step === 1 && (
-                        <div className="flex-1 p-8 overflow-y-auto max-w-3xl mx-auto w-full space-y-6">
-                            <h3 className="text-xl font-bold border-b pb-4 mb-6">基本信息</h3>
-                            <div className="space-y-4">
-                                <div>
-                                    <label className="block text-sm font-bold text-slate-700 mb-1">奖状名称</label>
-                                    <input className="w-full p-3 border rounded-xl" value={meta.name} onChange={e=>setMeta({...meta, name:e.target.value})} placeholder="例如: 2024 年度 DX 大师奖"/>
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-bold text-slate-700 mb-1">描述说明</label>
-                                    <textarea className="w-full p-3 border rounded-xl h-32" value={meta.description} onChange={e=>setMeta({...meta, description:e.target.value})} placeholder="奖状的简介、颁发机构等..."/>
-                                </div>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="block text-sm font-bold text-slate-700 mb-1">开始日期 (可选)</label>
-                                        <input type="date" className="w-full p-3 border rounded-xl" value={rules.basic.startDate} onChange={e=>setRules({...rules, basic: {...rules.basic, startDate: e.target.value}})} />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-bold text-slate-700 mb-1">结束日期 (可选)</label>
-                                        <input type="date" className="w-full p-3 border rounded-xl" value={rules.basic.endDate} onChange={e=>setRules({...rules, basic: {...rules.basic, endDate: e.target.value}})} />
-                                    </div>
-                                </div>
-                                <label className="flex items-center gap-3 p-4 border rounded-xl bg-slate-50 cursor-pointer">
-                                    <input type="checkbox" checked={rules.basic.qslRequired} onChange={e=>setRules({...rules, basic: {...rules.basic, qslRequired: e.target.checked}})} className="w-5 h-5"/>
-                                    <div>
-                                        <div className="font-bold">仅限已确认 QSO (QSL Required)</div>
-                                        <div className="text-xs text-slate-500">勾选后，只有 LotW 或实物卡片确认的记录才参与计算</div>
-                                    </div>
-                                </label>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Step 2: Advanced Rules Engine */}
-                    {step === 2 && (
-                        <div className="flex-1 flex h-full">
-                            <div className="w-64 bg-slate-50 border-r p-4 space-y-2">
-                                <div className="text-xs font-bold text-slate-400 uppercase mb-2">配置模块</div>
-                                {['filters', 'logic', 'scoring', 'threshold'].map(m => (
-                                    <button key={m} onClick={()=>document.getElementById(`mod-${m}`).scrollIntoView({behavior:'smooth'})} className="block w-full text-left px-4 py-2 rounded hover:bg-white text-sm font-medium text-slate-600">
-                                        {m==='filters'?'1. 筛选条件':m==='logic'?'2. 逻辑与目标':m==='scoring'?'3. 计分规则':'4. 达标阈值'}
-                                    </button>
-                                ))}
-                            </div>
-                            <div className="flex-1 p-8 overflow-y-auto space-y-10">
-                                {/* Filters */}
-                                <section id="mod-filters" className="space-y-4">
-                                    <h4 className="font-bold text-lg flex items-center gap-2"><Filter className="text-blue-500"/> 1. 有效 QSO 筛选条件</h4>
-                                    <div className="bg-slate-50 p-4 rounded-xl border space-y-2">
-                                        <div className="text-xs text-slate-400 mb-2">💡 提示：如需匹配任意值（如任意波段），请留空或输入 ANY。</div>
-                                        {rules.filters.map((f, idx) => (
-                                            <div key={idx} className="flex gap-2">
-                                                {/* Updated to Select */}
-                                                <select className="w-1/3 p-2 border rounded text-sm" value={f.field} onChange={e=>{const n=[...rules.filters];n[idx].field=e.target.value;setRules({...rules, filters:n})}}>
-                                                    <option value="" disabled>选择字段</option>
-                                                    <option value="band">波段 (BAND)</option>
-                                                    <option value="mode">模式 (MODE)</option>
-                                                    <option value="call">对方呼号 (CALL)</option>
-                                                    <option value="dxcc">DXCC ID</option>
-                                                    <option value="state">州/省 (STATE)</option>
-                                                    <option value="gridsquare">网格 (GRIDSQUARE)</option>
-                                                    <option value="iota">IOTA</option>
-                                                    <option value="freq">频率 (FREQ)</option>
-                                                    <option value="station_callsign">己方呼号 (STATION_CALLSIGN)</option>
-                                                </select>
-                                                <select className="p-2 border rounded text-sm" value={f.operator} onChange={e=>{const n=[...rules.filters];n[idx].operator=e.target.value;setRules({...rules, filters:n})}}>
-                                                    <option value="eq">等于 (=)</option><option value="neq">不等于 (!=)</option><option value="gt">大于 (&gt;)</option><option value="contains">包含</option>
-                                                </select>
-                                                <input className="flex-1 p-2 border rounded text-sm" placeholder="值 (如 20M)" value={f.value} onChange={e=>{const n=[...rules.filters];n[idx].value=e.target.value;setRules({...rules, filters:n})}}/>
-                                                <button onClick={()=>setRules({...rules, filters: rules.filters.filter((_,i)=>i!==idx)})} className="text-red-500"><Trash2 size={16}/></button>
-                                            </div>
-                                        ))}
-                                        <button onClick={()=>setRules({...rules, filters: [...rules.filters, {field:'band', operator:'eq', value:''}]})} className="text-sm font-bold text-blue-600">+ 添加筛选条件</button>
-                                    </div>
-                                </section>
-
-                                {/* Logic & Targets */}
-                                <section id="mod-logic" className="space-y-4">
-                                    <h4 className="font-bold text-lg flex items-center gap-2"><Target className="text-purple-500"/> 2. 核心逻辑与目标对象</h4>
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="p-4 border rounded-xl hover:border-blue-500 cursor-pointer transition-all" onClick={()=>setRules({...rules, logic: 'collection'})} style={{borderColor: rules.logic==='collection'?'#3b82f6':''}}>
-                                            <div className="font-bold mb-1">📦 收集型 (Collection)</div>
-                                            <div className="text-xs text-slate-500">统计唯一目标的数量 (如: 100个 DXCC，50个网格)</div>
-                                        </div>
-                                        <div className="p-4 border rounded-xl hover:border-blue-500 cursor-pointer transition-all" onClick={()=>setRules({...rules, logic: 'points'})} style={{borderColor: rules.logic==='points'?'#3b82f6':''}}>
-                                            <div className="font-bold mb-1">🔢 计分型 (Points)</div>
-                                            <div className="text-xs text-slate-500">基于分值的累加 (如: CW 10分，总分 500分)</div>
-                                        </div>
-                                    </div>
-                                    <div className="bg-slate-50 p-4 rounded-xl border">
-                                        <label className="block text-sm font-bold mb-2">目标对象类型</label>
-                                        <select className="w-full p-2 border rounded mb-2" value={rules.targets.type} onChange={e=>setRules({...rules, targets: {...rules.targets, type: e.target.value}})}>
-                                            <option value="any">任意 QSO (仅依靠筛选)</option>
-                                            <option value="callsign">特定呼号列表</option>
-                                            <option value="dxcc">特定 DXCC 实体</option>
-                                            <option value="grid">特定网格 (Grid)</option>
-                                            <option value="iota">特定 IOTA</option>
-                                            <option value="state">特定州/省 (State)</option>
-                                        </select>
-                                        {['callsign', 'dxcc', 'grid', 'iota', 'state'].includes(rules.targets.type) && (
-                                            <textarea 
-                                                className="w-full p-2 border rounded h-24 text-sm font-mono" 
-                                                placeholder="输入目标列表，用逗号分隔 (例如: BA1AA, BA4AA, BY1CRA...)"
-                                                value={rules.targets.list}
-                                                onChange={e=>setRules({...rules, targets: {...rules.targets, list: e.target.value}})}
-                                            />
-                                        )}
-                                    </div>
-                                </section>
-
-                                {/* Scoring & Deduplication */}
-                                <section id="mod-scoring" className="space-y-4">
-                                    <h4 className="font-bold text-lg flex items-center gap-2"><Calculator className="text-green-500"/> 3. 计分与去重</h4>
-                                    {rules.logic === 'points' && (
-                                        <div className="grid grid-cols-3 gap-4 mb-4">
-                                            {['cw', 'phone', 'data'].map(m => (
-                                                <div key={m} className="bg-slate-50 p-3 rounded-lg border text-center">
-                                                    <div className="text-xs text-slate-500 uppercase font-bold mb-1">{m} 分值</div>
-                                                    <input type="number" className="w-full text-center p-1 border rounded" value={rules.scoring[m]} onChange={e=>setRules({...rules, scoring: {...rules.scoring, [m]: parseFloat(e.target.value)}})} />
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                    <div className="bg-slate-50 p-4 rounded-xl border space-y-3">
-                                        <label className="block text-sm font-bold mb-2">去重规则 (Deduplication)</label>
-                                        <select className="w-full p-2 border rounded" value={rules.deduplication} onChange={e=>setRules({...rules, deduplication: e.target.value})}>
-                                            <option value="none">不去重 (所有有效 QSO 均计算)</option>
-                                            <option value="call">按呼号去重 (每个呼号只计一次)</option>
-                                            <option value="call_band">按呼号+波段去重 (每个呼号每个波段计一次)</option>
-                                            <option value="slot">按 Slot 去重 (呼号+波段+模式)</option>
-                                            <option value="state">按州/省去重 (State)</option>
-                                            <option value="custom">按自定义字段去重</option>
-                                        </select>
-                                        {rules.deduplication === 'custom' && (
-                                            <input 
-                                                className="w-full p-2 border rounded bg-white" 
-                                                placeholder="输入 ADIF 字段名 (例如: cnty)" 
-                                                value={rules.deduplicationCustomField}
-                                                onChange={e=>setRules({...rules, deduplicationCustomField: e.target.value})}
-                                            />
-                                        )}
-                                    </div>
-                                </section>
-
-                                {/* Threshold */}
-                                <section id="mod-threshold" className="space-y-4">
-                                    <h4 className="font-bold text-lg flex items-center gap-2"><Trophy className="text-yellow-500"/> 4. 达标等级 (Thresholds)</h4>
-                                    <div className="bg-yellow-50 p-4 rounded-xl border border-yellow-200 space-y-3">
-                                        <p className="text-xs text-yellow-800 mb-2">设置不同的奖项等级（如金、银、铜），系统将自动判定最高达成等级。</p>
-                                        {(rules.thresholds || [{name: 'Award', value: 1}]).map((t, idx) => (
-                                            <div key={idx} className="flex items-center gap-2">
-                                                <input 
-                                                    className="flex-1 p-2 border rounded text-sm" 
-                                                    placeholder="等级名称 (如: Gold)" 
-                                                    value={t.name}
-                                                    onChange={e=>{const n=[...rules.thresholds];n[idx].name=e.target.value;setRules({...rules, thresholds:n})}}
-                                                />
-                                                
-                                                <div className="flex items-center gap-1">
-                                                    <span className="font-bold text-yellow-800 text-sm">分数:</span>
-                                                    <input 
-                                                        type="number" 
-                                                        className="w-16 p-2 border rounded text-center font-bold" 
-                                                        value={t.value}
-                                                        onChange={e=>{const n=[...rules.thresholds];n[idx].value=parseFloat(e.target.value);setRules({...rules, thresholds:n})}}
-                                                    />
-                                                </div>
-
-                                                {/* 3. 全收集独立选项 */}
-                                                {hasSpecificTargets && (
-                                                    <label className="flex items-center gap-1 bg-white px-2 py-1 rounded border cursor-pointer select-none">
-                                                        <input 
-                                                            type="checkbox"
-                                                            checked={!!t.fullCollection}
-                                                            onChange={e=>{const n=[...rules.thresholds];n[idx].fullCollection=e.target.checked;setRules({...rules, thresholds:n})}}
-                                                            className="w-4 h-4 text-blue-600 rounded"
-                                                        />
-                                                        <span className="text-xs font-bold text-slate-600">必须全收集</span>
-                                                    </label>
-                                                )}
-                                                
-                                                {/* Color Picker for Badge */}
-                                                <div className="flex items-center gap-1 border p-1 rounded bg-white">
-                                                    <input 
-                                                        type="color" 
-                                                        className="w-6 h-6 p-0 border-0 rounded cursor-pointer" 
-                                                        value={t.color || '#eab308'}
-                                                        onChange={e=>{const n=[...rules.thresholds];n[idx].color=e.target.value;setRules({...rules, thresholds:n})}}
-                                                        title="设置奖状角标底色"
-                                                    />
-                                                </div>
-
-                                                <button onClick={()=>{
-                                                    if (rules.thresholds.length > 1) {
-                                                        setRules({...rules, thresholds: rules.thresholds.filter((_,i)=>i!==idx)});
-                                                    }
-                                                }} className="text-red-500 p-2"><Trash2 size={16}/></button>
-                                            </div>
-                                        ))}
-                                        <button onClick={()=>setRules({...rules, thresholds: [...(rules.thresholds || []), {name: 'Level ' + ((rules.thresholds?.length||0)+1), value: 0, color: '#3b82f6'}]})} className="text-sm font-bold text-yellow-700 flex items-center gap-1">
-                                            <Plus size={14}/> 添加等级
-                                        </button>
-                                    </div>
-                                </section>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Step 3: Visual Design (REWRITTEN: Cropper Only) */}
-                    {step === 3 && (
-                         <div className="flex-1 flex overflow-hidden">
-                            <div className="w-80 bg-slate-50 border-r p-4 overflow-y-auto space-y-6">
-                                <div>
-                                    <h4 className="font-bold mb-2">底图配置</h4>
-                                    <p className="text-xs text-slate-500 mb-4">请上传原始底图，然后通过缩放和移动将其调整至标准边框内。提交后系统将自动裁剪生成最终底图。</p>
-                                    
-                                    <label className="block w-full p-4 border-2 border-dashed border-slate-300 rounded-xl text-center cursor-pointer hover:bg-white transition-colors">
-                                        <Upload className="mx-auto text-slate-400 mb-2"/>
-                                        <span className="text-sm text-slate-600 font-bold">点击选择图片文件</span>
-                                        <input type="file" onChange={handleFileSelect} className="hidden" accept="image/*" />
-                                    </label>
-                                </div>
-
-                                {uploadedImage && (
-                                    <div className="space-y-4 pt-4 border-t">
-                                        <div>
-                                            <div className="flex justify-between text-xs font-bold mb-1">
-                                                <span>缩放 (Scale)</span>
-                                                <span>{Math.round(cropState.scale * 100)}%</span>
-                                            </div>
-                                            <input 
-                                                type="range" min="0.1" max="3" step="0.05" 
-                                                value={cropState.scale} 
-                                                onChange={e=>setCropState({...cropState, scale: parseFloat(e.target.value)})}
-                                                className="w-full"
-                                            />
-                                        </div>
-                                        <div>
-                                            <div className="flex justify-between text-xs font-bold mb-1">
-                                                <span>水平位移 (X)</span>
-                                                <span>{cropState.x}px</span>
-                                            </div>
-                                            <input 
-                                                type="range" min="-800" max="800" step="10" 
-                                                value={cropState.x} 
-                                                onChange={e=>setCropState({...cropState, x: parseInt(e.target.value)})}
-                                                className="w-full"
-                                            />
-                                        </div>
-                                        <div>
-                                            <div className="flex justify-between text-xs font-bold mb-1">
-                                                <span>垂直位移 (Y)</span>
-                                                <span>{cropState.y}px</span>
-                                            </div>
-                                            <input 
-                                                type="range" min="-600" max="600" step="10" 
-                                                value={cropState.y} 
-                                                onChange={e=>setCropState({...cropState, y: parseInt(e.target.value)})}
-                                                className="w-full"
-                                            />
-                                        </div>
-                                        <button onClick={()=>setCropState({scale:1,x:0,y:0})} className="w-full py-2 bg-slate-200 rounded text-xs font-bold">重置位置</button>
-                                    </div>
-                                )}
-                            </div>
-                            
-                            <div className="flex-1 bg-slate-800 p-8 flex items-center justify-center overflow-auto relative">
-                                {/* Preview Container 800x600 Fixed */}
-                                <div className="relative shadow-2xl bg-white overflow-hidden" style={{ width: '800px', height: '600px', flexShrink: 0 }}>
-                                    {uploadedImage ? (
-                                        <img 
-                                            src={uploadedImage.src} 
-                                            style={{
-                                                transform: `translate(${cropState.x}px, ${cropState.y}px) scale(${cropState.scale})`,
-                                                transformOrigin: '0 0', // Important for translate working with scale predictably logic can be simpler if origin is top-left
-                                            }}
-                                            className="origin-top-left"
-                                            draggable={false}
-                                            alt="Preview"
-                                        />
-                                    ) : (
-                                        bgUrl ? (
-                                            <img src={bgUrl} className="w-full h-full object-cover" alt="Current BG" />
-                                        ) : (
-                                            <div className="w-full h-full flex items-center justify-center text-slate-300">
-                                                暂无图片
-                                            </div>
-                                        )
-                                    )}
-                                </div>
-                                <div className="absolute top-4 left-4 text-white text-xs bg-black/50 p-2 rounded">
-                                    预览区域: 800 x 600 px (最终输出)
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                {/* Footer */}
-                <div className="p-4 border-t bg-slate-50 flex justify-between items-center">
-                    <div className="text-xs text-slate-400">
-                        {step === 3 && '提示: 提交审核或保存草稿时，系统将自动裁剪当前视图作为最终底图。'}
-                    </div>
-                    <div className="flex gap-4">
-                        <button onClick={()=>saveAward('draft')} className="px-6 py-2 border rounded-lg font-bold text-slate-600">保存草稿</button>
-                        <button onClick={()=>saveAward('pending')} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">提交审核</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// 5. User Center (Same as provided, kept intact)
-const UserCenterView = ({ user, refreshUser, onLogout }) => {
-    const [modal, setModal] = useState(null); 
-    const [qr, setQr] = useState('');
-    const [secret, setSecret] = useState('');
-    const [code, setCode] = useState('');
-    const [passForm, setPassForm] = useState({ oldPassword: '', newPassword: '', confirmPassword: '' });
-    const [confirmActionPass, setConfirmActionPass] = useState('');
-
-    const start2FASetup = async () => {
-        try {
-            const res = await apiFetch('/user/2fa/setup', { method: 'POST' });
-            setSecret(res.secret); setQr(res.qr); setModal('2fa_setup');
-        } catch(err) { alert(err.message); }
-    };
-
-    const confirm2FA = async () => {
-        try {
-            await apiFetch('/user/2fa/enable', { method: 'POST', body: JSON.stringify({ secret, token: code }) });
-            alert('2FA 已成功开启！'); setModal(null); refreshUser();
-        } catch(err) { alert(err.message); }
-    };
-
-    const disable2FA = async () => {
-        try {
-            await apiFetch('/user/2fa/disable', { method: 'POST', body: JSON.stringify({ password: confirmActionPass }) });
-            alert('2FA 已关闭'); setModal(null); refreshUser();
-        } catch(err) { alert(err.message); }
-    };
-
-    const changePassword = async () => {
-        if(passForm.newPassword !== passForm.confirmPassword) return alert('两次输入的新密码不一致');
-        try {
-            if (user.has2fa) {
-                const c = prompt('请输入 2FA 验证码以确认修改密码:');
-                if(!c) return;
-                sessionStorage.setItem('temp_2fa_code', c);
-            }
-            await apiFetch('/user/password', { method: 'POST', body: JSON.stringify(passForm) });
-            alert('密码修改成功'); setModal(null);
-        } catch(err) { alert(err.message); }
-    };
-
-    const handleDangerousAction = async (action) => {
-        try {
-            if (user.has2fa) {
-                const c = prompt('请输入 2FA 验证码以确认:');
-                if(!c) return;
-                sessionStorage.setItem('temp_2fa_code', c);
-            }
-            const url = action === 'clear_logs' ? '/user/logs' : '/user/account';
-            await apiFetch(url, { 
-                method: 'DELETE', 
-                body: JSON.stringify({ password: confirmActionPass }) 
-            });
-            
-            if (action === 'delete_account') {
-                alert('账号已注销');
-                onLogout();
-            } else {
-                alert('操作成功');
-                setModal(null);
-            }
-        } catch (err) { alert(err.message); }
-    };
-
-    return (
-        <div className="max-w-3xl space-y-6">
-            <h3 className="text-xl font-bold flex items-center gap-2"><User className="text-blue-600"/> 用户中心</h3>
-            <div className="bg-white p-6 rounded-2xl shadow-sm border">
-                <div className="flex items-center gap-4 mb-6">
-                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center text-2xl font-black text-slate-400">{user.callsign.substring(0,2)}</div>
-                    <div>
-                        <div className="text-2xl font-bold">{user.callsign}</div>
-                        <div className="text-slate-500 text-sm">角色: {user.role}</div>
-                    </div>
-                </div>
-            </div>
-            <div className="bg-white p-6 rounded-2xl shadow-sm border">
-                <h4 className="font-bold text-lg mb-4 flex items-center gap-2"><ShieldCheck className="text-green-600"/> 安全设置</h4>
-                <div className="space-y-4">
-                    <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
-                        <div className="flex items-center gap-3"><Key className="text-slate-400" /><div><div className="font-bold">登录密码</div></div></div>
-                        <button onClick={() => setModal('password')} className="bg-white border px-4 py-2 rounded-lg text-sm font-bold">修改密码</button>
-                    </div>
-                    <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
-                        <div className="flex items-center gap-3"><Lock className={user.has2fa ? "text-green-500" : "text-slate-400"} /><div><div className="font-bold">两步验证 (2FA)</div><div className="text-xs text-slate-400">{user.has2fa ? '已开启' : '未开启'}</div></div></div>
-                        {user.has2fa ? (
-                            <button onClick={() => setModal('2fa_disable')} className="bg-red-50 text-red-600 px-4 py-2 rounded-lg text-sm font-bold">关闭</button>
-                        ) : (
-                            <button onClick={start2FASetup} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold">开启</button>
-                        )}
-                    </div>
-                </div>
-            </div>
-            {user.role === 'user' && (
-                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-red-100">
-                    <h4 className="font-bold text-lg mb-4 flex items-center gap-2 text-red-600"><AlertCircle/> 危险区域</h4>
-                    <div className="space-y-4">
-                        <div className="flex items-center justify-between p-4 bg-red-50/50 rounded-xl">
-                            <div><div className="font-bold text-red-800">清空所有日志</div><div className="text-xs text-red-600">将永久删除您上传的所有 QSO 记录</div></div>
-                            <button onClick={() => setModal('clear_logs')} className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded-lg text-sm font-bold">清空日志</button>
-                        </div>
-                        <div className="flex items-center justify-between p-4 bg-red-50/50 rounded-xl">
-                            <div><div className="font-bold text-red-800">注销账号</div><div className="text-xs text-red-600">将永久删除您的账号及所有数据，无法恢复</div></div>
-                            <button onClick={() => setModal('delete_account')} className="bg-red-600 text-white hover:bg-red-700 px-4 py-2 rounded-lg text-sm font-bold">注销账号</button>
-                        </div>
-                    </div>
-                 </div>
-            )}
-            {modal && (
-                <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl w-full max-w-md p-6 space-y-4 relative z-[101]">
-                        <div className="flex justify-between items-center border-b pb-4">
-                            <h3 className="font-bold text-lg">{modal === 'password' ? '修改密码' : modal === '2fa_setup' ? '配置 2FA' : '安全确认'}</h3>
-                            <button onClick={()=>{setModal(null); setQr('');}}><X size={20}/></button>
-                        </div>
-                        {modal === 'password' && (
-                            <div className="space-y-4">
-                                <input type="password" placeholder="当前密码" className="w-full border p-3 rounded-lg" onChange={e=>setPassForm({...passForm, oldPassword: e.target.value})} />
-                                <input type="password" placeholder="新密码" className="w-full border p-3 rounded-lg" onChange={e=>setPassForm({...passForm, newPassword: e.target.value})} />
-                                <input type="password" placeholder="确认新密码" className="w-full border p-3 rounded-lg" onChange={e=>setPassForm({...passForm, confirmPassword: e.target.value})} />
-                                <button onClick={changePassword} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold">确认修改</button>
-                            </div>
-                        )}
-                        {modal === '2fa_setup' && (
-                            <div className="space-y-4 text-center">
-                                <div className="flex justify-center bg-white p-2 border rounded-lg">
-                                    {qr ? <img src={qr} alt="2FA QR" className="w-48 h-48"/> : <div>Loading...</div>}
-                                </div>
-                                <input placeholder="6 位验证码" className="w-full border p-3 rounded-lg text-center font-mono text-xl" maxLength={6} onChange={e=>setCode(e.target.value)} />
-                                <button onClick={confirm2FA} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold">验证开启</button>
-                            </div>
-                        )}
-                        {(modal === '2fa_disable' || modal === 'clear_logs' || modal === 'delete_account') && (
-                            <div className="space-y-4">
-                                <p className="text-sm bg-red-50 text-red-600 p-3 rounded-lg">
-                                    {modal === '2fa_disable' ? '警告：关闭 2FA 将降低账户安全性。' : '此操作不可逆，请输入登录密码以确认。'}
-                                </p>
-                                <input type="password" placeholder="登录密码" className="w-full border p-3 rounded-lg" onChange={e=>setConfirmActionPass(e.target.value)} />
-                                <button onClick={() => {
-                                    if(modal==='2fa_disable') disable2FA();
-                                    else handleDangerousAction(modal);
-                                }} className="w-full bg-red-600 text-white py-3 rounded-lg font-bold">确认执行</button>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-};
-
-// 6. Logbook View (Same as provided, kept intact)
-const LogbookView = () => {
-    // 4. 普通用户界面中，全部日志应与日志管理同级显示 -> This component now only handles UPLOAD.
-    // List view logic moved to 'AllLogsView'
-    const [file, setFile] = useState(null);
-    const [uploading, setUploading] = useState(false);
-    const [stats, setStats] = useState(null);
-
-    const handleUpload = async (e) => {
-        e.preventDefault();
-        if(!file) return;
-        setUploading(true);
-        const formData = new FormData();
-        formData.append('file', file);
-        try {
-            const res = await apiFetch('/logbook/upload', { method: 'POST', body: formData });
-            setStats(res);
-            alert(`成功导入 ${res.imported} 条 QSO 记录`);
-        } catch (err) { alert(err.message); } finally { setUploading(false); }
-    };
-
-    return (
-        <div className="space-y-6">
-            <h3 className="font-bold text-lg flex items-center gap-2"><Upload className="text-blue-600"/> 上传日志 (ADIF)</h3>
-            <div className="bg-white p-6 rounded-2xl shadow-sm border">
-                <form onSubmit={handleUpload} className="space-y-4">
-                    <div className="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center hover:bg-slate-50 transition-colors">
-                        <input type="file" accept=".adi,.adif" onChange={e => setFile(e.target.files[0])} className="hidden" id="adif-input" />
-                        <label htmlFor="adif-input" className="cursor-pointer block">
-                            <Database size={48} className="mx-auto text-slate-400 mb-2"/>
-                            <div className="text-slate-600 font-medium">{file ? file.name : "点击选择或拖拽 ADIF 文件"}</div>
-                        </label>
-                    </div>
-                    {uploading && <div className="text-center text-blue-600 font-bold animate-pulse">正在解析并导入数据...</div>}
-                    <button disabled={!file || uploading} className="bg-blue-600 text-white w-full py-3 rounded-xl font-bold disabled:opacity-50">
-                        {uploading ? '处理中...' : '开始上传'}
-                    </button>
-                </form>
-                {stats && (
-                    <div className="mt-6 p-4 bg-green-50 text-green-800 rounded-xl flex items-center gap-3">
-                        <CheckCircle size={20} />
-                        <span>本次解析 {stats.count} 条记录，成功入库 {stats.imported} 条 (去重后)。</span>
-                    </div>
-                )}
-            </div>
-        </div>
-    );
-};
-
-// New: All Logs View (Separated from LogbookView - Fixed data loading issue)
-const AllLogsView = () => {
-    const [logs, setLogs] = useState([]);
-    const [detailQso, setDetailQso] = useState(null);
-    const [qsoAwards, setQsoAwards] = useState([]);
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        // 3. 修复：当前普通用户界面中，全部日志未显示当前用户的完整日志
-        setLoading(true);
-        // Added timestamp to prevent caching
-        apiFetch(`/user/qsos?t=${new Date().getTime()}`)
-            .then(data => {
-                // Ensure data is an array
-                if (Array.isArray(data)) setLogs(data);
-                else setLogs([]);
-            })
-            .catch(console.error)
-            .finally(() => setLoading(false));
-    }, []);
-
-    const showQsoDetails = async (qso) => {
-        setDetailQso(qso);
-        setQsoAwards([]);
-        try {
-            const awards = await apiFetch(`/qsos/${qso.id}/awards`);
-            setQsoAwards(awards);
-        } catch(e) { console.error(e); }
-    };
-
-    return (
-        <div className="space-y-6">
-            <h3 className="font-bold text-lg flex items-center gap-2"><List className="text-blue-600"/> 全部日志</h3>
-            <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left text-sm">
-                        <thead className="bg-slate-50 text-slate-500 font-bold border-b">
-                            <tr>
-                                <th className="p-4 w-24">操作</th>
-                                <th className="p-4">Date</th>
-                                <th className="p-4">Callsign</th>
-                                <th className="p-4">Band</th>
-                                <th className="p-4">Mode</th>
-                                <th className="p-4">Country</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y">
-                            {loading ? (
-                                <tr><td colSpan="6" className="p-8 text-center text-slate-400">加载中...</td></tr>
-                            ) : logs.length === 0 ? (
-                                <tr><td colSpan="6" className="p-8 text-center text-slate-400">暂无日志</td></tr>
-                            ) : (
-                                logs.map(log => (
-                                    <tr key={log.id} className="hover:bg-slate-50">
-                                        <td className="p-4">
-                                            {/* 3. 每条日志前增设一列按钮，点击后可以查看详细通联信息及参与申领的奖项 */}
-                                            <button onClick={()=>showQsoDetails(log)} className="px-3 py-1 bg-blue-50 text-blue-600 rounded text-xs font-bold hover:bg-blue-100 border border-blue-200">详情</button>
-                                        </td>
-                                        <td className="p-4 font-mono">{log.qso_date}</td>
-                                        <td className="p-4 font-bold">{log.callsign}</td>
-                                        <td className="p-4">{log.band}</td>
-                                        <td className="p-4">{log.mode}</td>
-                                        <td className="p-4 text-slate-500 truncate max-w-[150px]">{log.country}</td>
-                                    </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            {detailQso && (
-                <div className="fixed inset-0 bg-black/50 z-[200] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl w-full max-w-lg p-6 relative">
-                        <button onClick={()=>setDetailQso(null)} className="absolute top-4 right-4 text-slate-400 hover:text-black"><X/></button>
-                        <h3 className="text-xl font-bold mb-4 flex items-center gap-2"><Database className="text-blue-500"/> QSO 详情</h3>
-                        
-                        <div className="bg-slate-50 p-4 rounded-xl border grid grid-cols-2 gap-4 mb-6 text-sm">
-                            <div><span className="text-slate-400 block text-xs uppercase">Callsign</span><span className="font-bold text-lg">{detailQso.callsign}</span></div>
-                            <div><span className="text-slate-400 block text-xs uppercase">Date</span><span className="font-bold">{detailQso.qso_date}</span></div>
-                            <div><span className="text-slate-400 block text-xs uppercase">Band</span><span className="font-bold">{detailQso.band}</span></div>
-                            <div><span className="text-slate-400 block text-xs uppercase">Mode</span><span className="font-bold">{detailQso.mode}</span></div>
-                            <div className="col-span-2"><span className="text-slate-400 block text-xs uppercase">Country</span><span className="font-bold">{detailQso.country || '-'}</span></div>
-                            <div className="col-span-2"><span className="text-slate-400 block text-xs uppercase">State</span><span className="font-bold">{detailQso.state || detailQso.adif_raw?.state || '-'}</span></div>
-                        </div>
-
-                        {/* 3. 查看该条日志参与申领的奖项 */}
-                        <h4 className="font-bold text-sm mb-2 flex items-center gap-2"><Award size={14}/> 参与的奖项申领 (Participating Awards)</h4>
-                        <div className="space-y-2 max-h-40 overflow-y-auto">
-                            {qsoAwards.length === 0 ? <div className="text-slate-400 text-xs italic">该 QSO 暂未符合任何已发布奖项的基础条件</div> : (
-                                qsoAwards.map(a => (
-                                    <div key={a.id} className="p-2 border rounded bg-yellow-50 text-yellow-800 text-xs font-bold flex justify-between items-center">
-                                        <span>{a.name}</span>
-                                        <CheckCircle size={12} className="text-green-600"/>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-};
-
-// 7. User Management (Same as provided, kept intact)
-const UserManage = () => {
-    const [users, setUsers] = useState([]);
-    const [editing, setEditing] = useState(null);
-    const [creating, setCreating] = useState(false);
-    const [twoFaCode, setTwoFaCode] = useState('');
-    const [newUserInfo, setNewUserInfo] = useState({ callsign: '', password: '', role: 'user' });
-    
-    useEffect(() => { loadUsers(); }, []);
-    
-    const loadUsers = async () => { 
-        try { 
-            const data = await apiFetch('/admin/users'); 
-            setUsers(data); 
-        } catch(e) { 
-            console.error("Failed to load users:", e);
-            if (e.status !== 401 && e.status !== 403) alert("加载用户列表失败: " + e.message);
-        } 
-    };
-
-    const handleAction = async (method, url, body = {}) => {
-        try {
-            const headers = twoFaCode ? { 'x-2fa-code': twoFaCode } : {};
-            await apiFetch(url, { method, body: JSON.stringify(body), headers });
-            alert('操作成功');
-            loadUsers(); setEditing(null); setCreating(false); setTwoFaCode(''); setNewUserInfo({ callsign: '', password: '', role: 'user' });
-        } catch (err) {
-            if (err.error === '2FA_REQUIRED') {
-                const code = prompt('请输入管理员 2FA 验证码以继续:');
-                if(code) { setTwoFaCode(code); alert('验证码已缓存，请再次点击确认。'); }
-            } else { alert(err.message); }
-        }
-    };
-
-    return (
-        <div className="space-y-6">
-            <div className="flex items-center justify-between">
-                <h3 className="font-bold text-xl flex items-center gap-2"><User size={24}/> 用户管理</h3>
-                <button onClick={()=>setCreating(true)} className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2"><UserPlus size={18}/> 添加用户</button>
-            </div>
-            {users.length === 0 ? (
-                <div className="text-center p-8 bg-white rounded-xl shadow border border-slate-100 text-slate-400">暂无用户数据或加载失败</div>
-            ) : (
-                <div className="bg-white rounded-xl shadow overflow-hidden">
-                    <table className="w-full text-left">
-                        <thead className="bg-slate-50 border-b">
-                            <tr><th className="p-4">ID</th><th className="p-4">呼号</th><th className="p-4">角色</th><th className="p-4">2FA</th><th className="p-4">操作</th></tr>
-                        </thead>
-                        <tbody className="divide-y">
-                            {users.map(u => (
-                                <tr key={u.id}>
-                                    <td className="p-4">{u.id}</td>
-                                    <td className="p-4 font-mono font-bold">{u.callsign}</td>
-                                    <td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${u.role==='admin'?'bg-red-100 text-red-700':u.role==='award_admin'?'bg-purple-100 text-purple-700':'bg-blue-100 text-blue-700'}`}>{u.role}</span></td>
-                                    <td className="p-4">{u.has_2fa ? <Check className="text-green-500"/> : <span className="text-slate-300">-</span>}</td>
-                                    <td className="p-4 flex gap-2">
-                                        <button onClick={()=>setEditing(u)} className="p-2 hover:bg-slate-100 rounded"><Edit size={16}/></button>
-                                        <button onClick={()=>handleAction('DELETE', `/admin/users/${u.id}`)} className="p-2 hover:bg-red-50 text-red-500 rounded"><Trash2 size={16}/></button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-            {(editing || creating) && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-                    <div className="bg-white p-6 rounded-xl w-full max-w-md space-y-4">
-                        <h4 className="font-bold">{creating ? '添加新用户' : `编辑用户 ${editing.callsign}`}</h4>
-                        {creating && <input className="w-full p-2 border rounded" placeholder="呼号" value={newUserInfo.callsign} onChange={e=>setNewUserInfo({...newUserInfo, callsign: e.target.value})} />}
-                        <select className="w-full p-2 border rounded" value={creating ? newUserInfo.role : editing.role} onChange={e=> creating ? setNewUserInfo({...newUserInfo, role: e.target.value}) : setEditing({...editing, role:e.target.value})}>
-                            <option value="user">普通用户</option><option value="award_admin">奖状管理员</option><option value="admin">系统管理员</option>
-                        </select>
-                        <input className="w-full p-2 border rounded" placeholder={creating ? "设置密码" : "重置密码 (留空不修改)"} type="password" id="modal-pass" value={creating ? newUserInfo.password : undefined} onChange={creating ? (e)=>setNewUserInfo({...newUserInfo, password:e.target.value}) : undefined}/>
-                        <button onClick={()=>{
-                            if (creating) handleAction('POST', '/admin/users', newUserInfo);
-                            else { const pass = document.getElementById('modal-pass').value; handleAction('PUT', `/admin/users/${editing.id}`, { role: editing.role, password: pass || undefined }); }
-                        }} className="w-full bg-blue-600 text-white py-2 rounded font-bold">确认保存</button>
-                        <button onClick={()=>{setEditing(null); setCreating(false);}} className="w-full text-slate-500 py-2">取消</button>
-                    </div>
-                </div>
-            )}
-        </div>
-    );
-};
-
-// ================= Main App =================
-
-export default function App() {
-  const [view, setView] = useState('loading'); 
-  const [user, setUser] = useState(null);
-  const [subView, setSubView] = useState('dashboard');
-  const [show2FAInput, setShow2FAInput] = useState(false);
-  const [loginForm, setLoginForm] = useState({});
-  const [authMode, setAuthMode] = useState('login'); // Added for in-page register
-  
-  // New States for Menu and Notifications
-  const [expandedMenus, setExpandedMenus] = useState({});
-  const [notifications, setNotifications] = useState({ pending: 0, returned: 0 });
-
-  useEffect(() => {
-    apiFetch('/system-status').then(status => {
-        if (!status.installed) {
-            setView('install');
-        } else {
-            const savedUser = localStorage.getItem('ham_user');
-            if (savedUser) {
-                setUser(JSON.parse(savedUser));
-                setView('main');
-            } else {
-                setView('auth'); // Changed from 'login' to 'auth'
-            }
-        }
-    }).catch(() => setView('auth'));
-  }, []);
-
-  // 1 & 2. Auto-check for notifications every 1 second
-  useEffect(() => {
-      if (view !== 'main' || !user) return;
-      
-      const checkNotifications = () => {
-          // Re-use dashboard stats endpoint for notifications
-          // In a real app, you might want a lighter endpoint
-          apiFetch('/stats/dashboard').then(stats => {
-              if (user.role === 'admin') {
-                  setNotifications({ pending: stats.awards_pending || 0 });
-              } else if (user.role === 'award_admin') {
-                  setNotifications({ returned: stats.my_returned || 0 });
-              }
-          }).catch(console.error);
-      };
-
-      const intervalId = setInterval(checkNotifications, 1000);
-      checkNotifications(); // Initial check
-
-      return () => clearInterval(intervalId);
-  }, [view, user]);
-
-  const refreshUser = async () => {
-    try {
-        const u = await apiFetch('/user/profile');
-        setUser(u);
-        localStorage.setItem('ham_user', JSON.stringify(u));
-    } catch(e) { console.error(e); }
-  };
-
-  const handleLogin = async (e) => {
-      e.preventDefault();
-      const formData = new FormData(e.target);
-      const data = Object.fromEntries(formData);
-      const payload = { ...loginForm, ...data }; // Removed loginType
-      
-      try {
-          const res = await apiFetch('/auth/login', { method: 'POST', body: JSON.stringify(payload) });
-          localStorage.setItem('ham_token', res.token);
-          localStorage.setItem('ham_user', JSON.stringify(res.user));
-          setUser(res.user);
-          setSubView('dashboard');
-          setView('main');
-          setShow2FAInput(false);
-      } catch (err) {
-          if (err.error === '2FA_REQUIRED') {
-              setLoginForm(data);
-              setShow2FAInput(true);
-          } else { alert(err.message || '登录失败'); }
-      }
-  };
-
-  const handleRegister = async (e) => {
-      e.preventDefault();
-      const formData = new FormData(e.target);
-      const data = Object.fromEntries(formData);
-      if (data.password !== data.confirmPassword) return alert("两次输入的密码不一致");
-      
-      try {
-          await apiFetch('/auth/register', { method: 'POST', body: JSON.stringify(data) });
-          alert('注册成功！请登录。');
-          setAuthMode('login');
-      } catch (err) { alert(err.message); }
-  };
-
-  const handleLogout = () => { localStorage.clear(); window.location.reload(); };
-
-  const toggleMenu = (id) => {
-      setExpandedMenus(prev => ({ ...prev, [id]: !prev[id] }));
-  };
-
-  // Clear notification on click
-  const handleMenuClick = (item) => {
-      if (item.children) {
-          toggleMenu(item.id);
-      } else {
-          setSubView(item.id);
-          // 1 & 2. Click to clear red dot simulation (real clear happens on next poll usually, but UI can be optimistic)
-          if (item.id === 'admin_audit') setNotifications(prev => ({ ...prev, pending: 0 }));
-          if (item.id === 'award_returned') setNotifications(prev => ({ ...prev, returned: 0 })); 
-          // Note: Logic says "Click to enter interface then eliminate red dot". 
-          // The interval will keep it 0 if the backend status changes, or we can just ignore it locally until refresh.
-      }
-  };
-
-  if (view === 'install') return <InstallView onComplete={() => window.location.reload()} />;
-
-  if (view === 'auth') return (
-    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden relative">
-        <div className="flex border-b">
-            <button onClick={()=>setAuthMode('login')} className={`flex-1 py-4 font-bold text-sm ${authMode==='login'?'text-blue-600 bg-blue-50/50':'text-slate-400'}`}>登录</button>
-            <button onClick={()=>setAuthMode('register')} className={`flex-1 py-4 font-bold text-sm ${authMode==='register'?'text-blue-600 bg-blue-50/50':'text-slate-400'}`}>注册新账号</button>
-        </div>
-
-        {authMode === 'login' ? (
-            <div className="p-8">
-                {/* Merged Login: No more Admin/User toggle */}
-                <form onSubmit={handleLogin} className="space-y-4">
-                    {!show2FAInput ? (
-                        <>
-                            <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">呼号 (用户名)</label><input name="callsign" required className="w-full border rounded-lg p-3 outline-none focus:ring-2 ring-blue-100 transition-all" /></div>
-                            <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">密码</label><input name="password" type="password" required className="w-full border rounded-lg p-3 outline-none focus:ring-2 ring-blue-100 transition-all" /></div>
-                        </>
-                    ) : (
-                        <div className="space-y-1 animate-in fade-in slide-in-from-right duration-300">
-                            <label className="text-xs font-bold text-blue-600 uppercase flex items-center gap-2"><Lock size={12}/> 二步验证码 (2FA)</label>
-                            <input name="code" autoFocus className="w-full border-2 border-blue-500 rounded-lg p-3 text-center tracking-[1em] font-mono font-bold text-xl" placeholder="000000" maxLength={6} />
-                            <button type="button" onClick={()=>setShow2FAInput(false)} className="text-xs text-slate-400 hover:text-slate-600 underline w-full text-center block mt-2">返回重新输入账号</button>
-                        </div>
-                    )}
-                    <button className="w-full py-4 bg-slate-900 text-white rounded-xl font-bold shadow-lg shadow-slate-200 transition-transform active:scale-95 hover:bg-black">
-                        {show2FAInput ? '验证并登录' : '登录系统'}
-                    </button>
-                </form>
-            </div>
-        ) : (
-            <div className="p-8">
-                <div className="text-center mb-6">
-                    <h2 className="text-xl font-bold text-slate-800">欢迎加入 HAM AWARDS</h2>
-                    <p className="text-xs text-slate-400 mt-1">创建您的账户以申请奖状和管理日志</p>
-                </div>
-                <form onSubmit={handleRegister} className="space-y-4">
-                    <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">注册呼号</label><input name="callsign" required className="w-full border rounded-lg p-3" placeholder="例如: BA1AA" /></div>
-                    <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">设置密码</label><input name="password" type="password" required className="w-full border rounded-lg p-3" /></div>
-                    <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">确认密码</label><input name="confirmPassword" type="password" required className="w-full border rounded-lg p-3" /></div>
-                    <button className="w-full py-4 bg-green-600 text-white rounded-xl font-bold shadow-lg shadow-green-200 hover:bg-green-700 transition-colors">立即注册</button>
-                </form>
-            </div>
-        )}
-      </div>
-    </div>
-  );
-
-  if (view === 'main') {
-      const menu = [
-          // Common
-          { id: 'dashboard', label: '概览', icon: BarChart, show: true },
-          { id: 'awards', label: '奖状大厅', icon: Award, show: true },
-          
-          // User Only
-          { id: 'my_awards', label: '我的奖状', icon: CheckCircle, show: user.role === 'user' },
-          { id: 'logbook', label: '日志上传', icon: Upload, show: user.role === 'user' }, 
-          { id: 'all_logs', label: '全部日志', icon: List, show: user.role === 'user' }, 
-          
-          // Award Admin Only (Split Views with Dropdown)
-          { id: 'award_create', label: '新建奖状', icon: Plus, show: user.role === 'award_admin' },
-          { 
-              id: 'drafts_group', 
-              label: '草稿箱', 
-              icon: FileText, 
-              show: user.role === 'award_admin',
-              isDropdown: true,
-              children: [
-                  { id: 'award_drafts', label: '我的草稿' },
-                  { id: 'award_returned', label: '打回草稿', notification: notifications.returned }
-              ],
-              notification: notifications.returned // 2. Parent red dot if child has notifications
-          },
-          { id: 'award_audit_list', label: '审核列表', icon: List, show: user.role === 'award_admin' },
-
-          // System Admin Only (Split Views)
-          { id: 'admin_audit', label: '奖状审核', icon: CheckCircle, show: user.role === 'admin', notification: notifications.pending }, // 1. System Admin Red Dot
-          { id: 'admin_overview', label: '奖状总览', icon: Layout, show: user.role === 'admin' },
-          { id: 'issuanceManager', label: '颁发管理', icon: Trophy, show: user.role === 'admin' }, 
-          { id: 'users', label: '用户管理', icon: Users, show: user.role === 'admin' },
-          
-          // Common Bottom
-          { id: 'userCenter', label: '用户中心', icon: User, show: true },
-      ].filter(i => i.show);
-
-      return (
-          <div className="flex h-screen bg-slate-50 overflow-hidden">
-              <aside className="w-64 bg-slate-900 text-white flex flex-col shrink-0">
-                  <div className="p-6 border-b border-slate-800">
-                      <h1 className="font-black text-xl tracking-wider">HAM AWARDS</h1>
-                      <div className="text-xs text-slate-500 mt-1 flex items-center gap-2"><div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>{user.callsign} ({user.role})</div>
-                  </div>
-                  <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
-                      {menu.map(item => (
-                          <div key={item.id}>
-                            <button 
-                                onClick={() => handleMenuClick(item)} 
-                                className={`w-full flex items-center justify-between px-4 py-3 rounded-lg transition-all ${subView===item.id || (item.children && expandedMenus[item.id]) ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
-                            >
-                                <div className="flex items-center gap-3">
-                                    <item.icon size={18} />
-                                    <span className="font-medium text-sm">{item.label}</span>
-                                </div>
+                <nav className="flex-1 p-4 overflow-y-auto">
+                    <ul className="space-y-1">
+                        {getNavItems(user.role).map((item) => (
+                            <li key={item.id}>
                                 {item.children ? (
-                                    <div className="flex items-center gap-2">
-                                        {item.notification > 0 && <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>}
-                                        {expandedMenus[item.id] ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}
+                                    <div>
+                                        <button
+                                            onClick={() => toggleMenu(item.id)}
+                                            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left ${expandedMenus[item.id] ? 'bg-slate-100 text-slate-900' : 'text-slate-600 hover:bg-slate-50'}`}
+                                        >
+                                            <item.icon size={18} />
+                                            <span className="font-medium">{item.label}</span>
+                                            <ChevronRight size={16} className={`ml-auto transition-transform ${expandedMenus[item.id] ? 'rotate-90' : ''}`} />
+                                        </button>
+                                        {expandedMenus[item.id] && (
+                                            <ul className="mt-1 space-y-1 pl-10">
+                                                {item.children.map((child) => (
+                                                    <li key={child.id}>
+                                                        <button
+                                                            onClick={() => handleMenuClick(child)}
+                                                            className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-slate-600 hover:bg-slate-50 ${subView === child.id ? 'bg-blue-50 text-blue-600 font-medium' : ''}`}
+                                                        >
+                                                            <child.icon size={16} />
+                                                            <span>{child.label}</span>
+                                                        </button>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
                                     </div>
                                 ) : (
-                                    item.notification > 0 && <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+                                    <button
+                                        onClick={() => handleMenuClick(item)}
+                                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left ${subView === item.id ? 'bg-blue-50 text-blue-600 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}
+                                    >
+                                        <item.icon size={18} />
+                                        <span className="font-medium">{item.label}</span>
+                                    </button>
                                 )}
+                            </li>
+                        ))}
+                    </ul>
+                </nav>
+
+                <div className="p-4 border-t border-slate-100">
+                    <button
+                        onClick={handleLogout}
+                        className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-red-600 hover:bg-red-50"
+                    >
+                        <LogOut size={18} />
+                        <span className="font-medium">退出登录</span>
+                    </button>
+                </div>
+            </aside>
+
+            {/* Main Content */}
+            <main className="flex-1 p-6 overflow-y-auto">
+                {/* Header */}
+                <header className="mb-6 flex justify-between items-center">
+                    <div>
+                        <h2 className="text-2xl font-bold text-slate-900">
+                            {subView === 'dashboard' ? '仪表盘' :
+                             subView === 'awards' ? '奖状大厅' :
+                             subView === 'my-awards' ? '我的奖状' :
+                             subView === 'logbook' ? '日志上传' :
+                             subView === 'users' ? '用户管理' :
+                             subView === 'awards-admin' ? '奖状管理' :
+                             subView === 'system' ? '系统设置' :
+                             subView === 'create-award' ? '创建奖状' :
+                             subView === 'audit-awards' ? '审核奖状' :
+                             subView === 'notifications' ? '通知中心' : 'HAM AWARDS'}
+                        </h2>
+                        <p className="text-sm text-slate-500">欢迎回来，{user.callsign}</p>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        <button className="p-2 hover:bg-slate-100 rounded-full">
+                            <Bell size={20} />
+                        </button>
+                        <div className="relative">
+                            <button className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-100 hover:bg-slate-200">
+                                <User size={16} />
+                                <span className="text-sm font-medium">{user.callsign}</span>
                             </button>
-                            {/* Dropdown Children */}
-                            {item.children && expandedMenus[item.id] && (
-                                <div className="ml-4 mt-1 pl-4 border-l border-slate-700 space-y-1">
-                                    {item.children.map(child => (
-                                        <button 
-                                            key={child.id}
-                                            onClick={() => handleMenuClick(child)}
-                                            className={`w-full flex items-center justify-between px-4 py-2 rounded-lg text-sm transition-all ${subView===child.id ? 'text-white font-bold bg-white/10' : 'text-slate-500 hover:text-white'}`}
-                                        >
-                                            <span>{child.label}</span>
-                                            {child.notification > 0 && <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>}
-                                        </button>
-                                    ))}
-                                </div>
-                            )}
-                          </div>
-                      ))}
-                  </nav>
-                  <div className="p-4 border-t border-slate-800">
-                      <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-red-900/20 rounded-lg"><LogOut size={18} /> <span className="font-medium text-sm">退出登录</span></button>
-                  </div>
-              </aside>
-              <main className="flex-1 overflow-y-auto p-8 relative">
-                  <div className="max-w-6xl mx-auto">
-                      {subView === 'dashboard' && <DashboardView user={user} />}
-                      {subView === 'awards' && <AwardCenterView user={user} />} 
-                      {subView === 'my_awards' && <MyAwardsView user={user} />}
-                      {subView === 'logbook' && <LogbookView />}
-                      {subView === 'all_logs' && <AllLogsView />}
-                      {subView === 'users' && <UserManage />}
-                      
-                      {/* Award Admin Split Views */}
-                      {subView === 'award_create' && <AwardAdminManager viewMode="create" />}
-                      {subView === 'award_drafts' && <AwardAdminManager viewMode="drafts" />}
-                      {subView === 'award_returned' && <AwardAdminManager viewMode="returned" />}
-                      {subView === 'award_audit_list' && <AwardAdminManager viewMode="audit_list" />}
-                      
-                      {/* System Admin Split Views */}
-                      {subView === 'admin_audit' && <SystemAdminAwardManager viewMode="audit" />}
-                      {subView === 'admin_overview' && <SystemAdminAwardManager viewMode="overview" />}
-                      
-                      {subView === 'issuanceManager' && <IssuanceManager />}                      
-                      {subView === 'userCenter' && <UserCenterView user={user} refreshUser={refreshUser} onLogout={handleLogout} />}
-                  </div>
-              </main>
-          </div>
-      );
-  }
-  return null;
+                        </div>
+                    </div>
+                </header>
+
+                {/* Content Area */}
+                <div className="space-y-6">
+                    {renderSubView()}
+                </div>
+            </main>
+        </div>
+    );
 }

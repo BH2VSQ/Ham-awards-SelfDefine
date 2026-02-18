@@ -46,21 +46,71 @@ let appConfig = {
  * 1. 工具函数：ADIF 解析 & MinIO 初始化
  * ==========================================
  */
+/**
+ * 根据频率解析波段
+ * @param {string|number} freq - 频率值（单位：MHz）
+ * @returns {string} 对应的波段
+ */
+function getBandFromFrequency(freq) {
+  if (!freq) return '';
+  
+  // 转换为数字
+  const frequency = parseFloat(freq);
+  if (isNaN(frequency)) return '';
+  
+  // 常用波段频率范围映射
+  if (frequency >= 1.8 && frequency < 2.0) return '160m';
+  if (frequency >= 3.5 && frequency < 4.0) return '80m';
+  if (frequency >= 7.0 && frequency < 7.3) return '40m';
+  if (frequency >= 10.1 && frequency < 10.15) return '30m';
+  if (frequency >= 14.0 && frequency < 14.35) return '20m';
+  if (frequency >= 18.068 && frequency < 18.168) return '17m';
+  if (frequency >= 21.0 && frequency < 21.45) return '15m';
+  if (frequency >= 24.89 && frequency < 24.99) return '12m';
+  if (frequency >= 28.0 && frequency < 29.7) return '10m';
+  if (frequency >= 50.0 && frequency < 54.0) return '6m';
+  if (frequency >= 144.0 && frequency < 148.0) return '2m';
+  if (frequency >= 430.0 && frequency < 440.0) return '70cm';
+  
+  return '';
+}
+
+/**
+ * 解析 ADIF 格式的日志文件
+ * @param {string} adifString - ADIF 格式的原始字符串
+ * @returns {Array} 解析后的 QSO 记录数组
+ */
 function parseAdif(adifString) {
   const records = [];
+  // 按 EOR (End of Record) 标记分割记录
   const parts = adifString.split(/<eor>/i); 
   
   for (let part of parts) {
-    if (!part.trim()) continue;
+    if (!part.trim()) continue; // 跳过空记录
     const record = {};
-    const regex = /<([a-zA-Z0-9_]+):(\d+)(?::[a-zA-Z])?>([^<]*)/g;
+    // 正则表达式匹配 ADIF 字段格式: <field: length>data
+    // 使用 [\s\S]*? 来匹配包括换行符在内的所有字符，确保捕获注释部分
+    const regex = /<([a-zA-Z0-9_]+):(\d+)(?::[a-zA-Z])?>([\s\S]*?)(?=<|$)/g;
     let match;
     while ((match = regex.exec(part)) !== null) {
-      const field = match[1].toLowerCase();
-      const length = parseInt(match[2]);
-      const data = match[3].substring(0, length);
-      record[field] = data.trim();
+      const field = match[1].toLowerCase(); // 字段名转小写
+      const length = parseInt(match[2]); // 字段长度
+      // 对于所有字段，都保留完整数据，因为ADIF的长度字段可能不包括注释部分
+      const data = match[3]; // 提取完整数据
+      record[field] = data.trim(); // 去除首尾空格
     }
+    
+    // 如果没有band字段但有freq字段，尝试从频率解析波段
+    if (!record.band && record.freq) {
+      record.band = getBandFromFrequency(record.freq);
+    }
+    
+    // 如果band是纯数字，添加单位M
+    if (record.band && !isNaN(parseFloat(record.band)) && isFinite(record.band)) {
+      record.band = record.band + 'M';
+    }
+    
+    // 只保留包含呼号和日期的有效记录
     if (record.call && record.qso_date) {
       records.push(record);
     }
@@ -68,13 +118,229 @@ function parseAdif(adifString) {
   return records;
 }
 
+/**
+ * 解析 cty.dat 文件，构建前缀到 DXCC 的映射
+ * @returns {Object} 包含前缀映射、DXCC 代码映射和 DXCC 信息的对象
+ */
+function parseCtyDat() {
+  const ctyDatPath = path.join(__dirname, 'cty.dat');
+  if (!fs.existsSync(ctyDatPath)) {
+    console.warn('cty.dat file not found');
+    return { prefixMap: {}, dxccCodeMap: {}, dxccInfo: {} };
+  }
+  
+  const content = fs.readFileSync(ctyDatPath, 'utf8');
+  const lines = content.split('\n');
+  const prefixMap = {};
+  const dxccCodeMap = {};
+  const dxccInfo = {};
+  
+  let currentDxcc = null;
+  let currentDxccCode = null;
+  let currentPrefixes = [];
+  
+  for (let line of lines) {
+    line = line.trim();
+    if (!line || line.startsWith('#')) continue;
+    
+    // 检查是否是新的 DXCC 记录行
+    if (!line.startsWith('=')) {
+      // 保存之前的 DXCC 信息
+      if (currentDxcc && currentPrefixes.length > 0) {
+        for (let prefix of currentPrefixes) {
+          if (!prefixMap[prefix]) {
+            prefixMap[prefix] = currentDxcc;
+          }
+        }
+        dxccInfo[currentDxcc] = {
+          name: currentDxcc,
+          code: currentDxccCode,
+          prefixes: currentPrefixes
+        };
+        // 构建 DXCC 代码到名称的映射
+        if (currentDxccCode) {
+          dxccCodeMap[currentDxccCode] = currentDxcc;
+        }
+      }
+      
+      // 解析新的 DXCC 记录
+      // 提取DXCC名称（冒号前的部分）
+      const colonIndex = line.indexOf(':');
+      if (colonIndex > 0) {
+        const dxccName = line.substring(0, colonIndex).trim();
+        currentDxcc = dxccName;
+        
+        // 尝试从行中提取DXCC代码
+        // 格式通常是: [名称]: [dxcc_code]: [itu_zone]: [continent]: ...
+        const parts = line.substring(colonIndex + 1).split(':').map(p => p.trim());
+        if (parts.length > 0) {
+          const codePart = parts[0];
+          if (codePart && !isNaN(codePart)) {
+            currentDxccCode = codePart;
+          } else {
+            currentDxccCode = null;
+          }
+        } else {
+          currentDxccCode = null;
+        }
+      } else {
+        currentDxcc = line.trim();
+        currentDxccCode = null;
+      }
+      currentPrefixes = [];
+    } else {
+      // 解析前缀行
+      let prefixPart = line.substring(1).trim();
+      // 移除行尾的分号
+      if (prefixPart.endsWith(';')) {
+        prefixPart = prefixPart.slice(0, -1);
+      }
+      // 按逗号分割前缀
+      const prefixes = prefixPart.split(',').map(p => p.trim().toUpperCase());
+      // 添加有效的前缀
+      for (let p of prefixes) {
+        if (p) {
+          currentPrefixes.push(p);
+        }
+      }
+    }
+  }
+  
+  // 保存最后一个 DXCC 信息
+  if (currentDxcc && currentPrefixes.length > 0) {
+    for (let prefix of currentPrefixes) {
+      if (!prefixMap[prefix]) {
+        prefixMap[prefix] = currentDxcc;
+      }
+    }
+    dxccInfo[currentDxcc] = {
+      name: currentDxcc,
+      code: currentDxccCode,
+      prefixes: currentPrefixes
+    };
+    // 构建 DXCC 代码到名称的映射
+    if (currentDxccCode) {
+      dxccCodeMap[currentDxccCode] = currentDxcc;
+    }
+  }
+  
+  // 特殊处理：手动添加常见前缀映射
+  // 中国前缀
+  const chinaPrefixes = ['BA', 'BB', 'BC', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ', 'BK', 'BL', 'BM', 'BN', 'BO', 'BP', 'BQ', 'BR', 'BS', 'BT', 'BU', 'BV', 'BW', 'BX', 'BY', 'BZ'];
+  for (let prefix of chinaPrefixes) {
+    if (!prefixMap[prefix]) {
+      prefixMap[prefix] = 'China';
+    }
+  }
+  
+  // 美国前缀
+  const usaPrefixes = ['W', 'K', 'N', 'AA', 'AB', 'AC', 'AD', 'AE', 'AF', 'AG', 'AH', 'AI', 'AJ', 'AK', 'AL', 'AM', 'AN', 'AO', 'AP', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AV', 'AW', 'AX', 'AY', 'AZ'];
+  for (let prefix of usaPrefixes) {
+    if (!prefixMap[prefix]) {
+      prefixMap[prefix] = 'United States';
+    }
+  }
+  
+  // 俄罗斯前缀
+  const russiaPrefixes = ['UA', 'UA0', 'UA1', 'UA2', 'UA3', 'UA4', 'UA5', 'UA6', 'UA7', 'UA8', 'UA9', 'UW', 'UX', 'UY', 'UZ', 'RA', 'RB', 'RC', 'RD', 'RE', 'RF', 'RG', 'RH', 'RI', 'RJ', 'RK', 'RL', 'RM', 'RN', 'RO', 'RP', 'RQ', 'RR', 'RS', 'RT', 'RU', 'RV', 'RW', 'RX', 'RY', 'RZ'];
+  for (let prefix of russiaPrefixes) {
+    if (!prefixMap[prefix]) {
+      prefixMap[prefix] = 'Russia';
+    }
+  }
+  
+  // 确保DXCC代码映射正确
+  dxccCodeMap['24'] = 'China';
+  dxccCodeMap['05'] = 'United States';
+  dxccCodeMap['16'] = 'European Russia';
+  dxccCodeMap['17'] = 'Asiatic Russia';
+  dxccCodeMap['15'] = 'Vienna Intl Ctr';
+  
+  // 添加更多常用DXCC代码映射
+  dxccCodeMap['291'] = 'International Space Station';
+  dxccCodeMap['239'] = 'United Nations HQ';
+  dxccCodeMap['001'] = 'Canada';
+  dxccCodeMap['002'] = 'Mexico';
+  dxccCodeMap['003'] = 'Cuba';
+  dxccCodeMap['004'] = 'Bahamas';
+  dxccCodeMap['006'] = 'Belize';
+  dxccCodeMap['007'] = 'Guatemala';
+  dxccCodeMap['008'] = 'El Salvador';
+  dxccCodeMap['009'] = 'Honduras';
+  dxccCodeMap['010'] = 'Nicaragua';
+  dxccCodeMap['011'] = 'Costa Rica';
+  dxccCodeMap['012'] = 'Panama';
+  
+  return { prefixMap, dxccCodeMap, dxccInfo };
+}
+
+// 解析 cty.dat 文件
+const { prefixMap, dxccCodeMap: parsedDxccCodeMap } = parseCtyDat();
+
+// 读取 dxcc_codes.json 文件
+let dxccCodeMap = { ...parsedDxccCodeMap };
+try {
+  const dxccCodesPath = path.join(__dirname, 'dxcc_codes.json');
+  if (fs.existsSync(dxccCodesPath)) {
+    const dxccCodesData = fs.readFileSync(dxccCodesPath, 'utf8');
+    const dxccCodes = JSON.parse(dxccCodesData);
+    if (dxccCodes.dxcc_codes) {
+      dxccCodeMap = { ...dxccCodeMap, ...dxccCodes.dxcc_codes };
+      console.log('DXCC codes loaded from dxcc_codes.json');
+    }
+  }
+} catch (error) {
+  console.warn('Error loading dxcc_codes.json:', error.message);
+}
+
+/**
+ * 根据呼号推断 DXCC
+ * @param {string} callsign - 呼号
+ * @returns {string} DXCC 名称
+ */
+function inferDxccFromCallsign(callsign) {
+  if (!callsign) return '';
+  
+  // 转换为大写
+  const call = callsign.toUpperCase();
+  
+  // 特殊处理：以B开头的呼号直接锁定为中国
+  if (call.startsWith('B')) {
+    return 'China';
+  }
+  
+  // 尝试匹配最长的前缀
+  let longestMatch = '';
+  let matchedDxcc = '';
+  
+  for (let i = call.length; i > 0; i--) {
+    const prefix = call.substring(0, i);
+    if (prefixMap[prefix]) {
+      longestMatch = prefix;
+      matchedDxcc = prefixMap[prefix];
+      break;
+    }
+  }
+  
+  return matchedDxcc;
+}
+
+/**
+ * 初始化 MinIO 存储桶
+ * @returns {Promise<void>}
+ */
 async function initMinioBucket() {
+    // 检查 MinIO 客户端和存储桶配置是否存在
     if (!minioClient || !appConfig.minioBucket) return;
     try {
+        // 检查存储桶是否已存在
         const exists = await minioClient.bucketExists(appConfig.minioBucket);
         if (!exists) {
+            // 创建新的存储桶
             await minioClient.makeBucket(appConfig.minioBucket, 'us-east-1');
             console.log(`Bucket '${appConfig.minioBucket}' created successfully.`);
+            
+            // 设置存储桶访问策略，允许公共读取
             const policy = {
                 Version: "2012-10-17",
                 Statement: [{
@@ -96,36 +362,55 @@ async function initMinioBucket() {
  * 2. 系统初始化
  * ==========================================
  */
-function loadConfig() {
+/**
+ * 加载系统配置
+ * @returns {Promise<void>}
+ */
+async function loadConfig() {
+  // 检查配置文件是否存在
   if (fs.existsSync(CONFIG_FILE)) {
     try {
+      // 读取并解析配置文件
       const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      // 合并配置到全局配置对象
       appConfig = { ...appConfig, ...data };
       
+      // 初始化数据库连接池
       if (appConfig.installed && appConfig.db) {
         dbPool = new Pool(appConfig.db);
         console.log("Database pool initialized.");
-        upgradeSchema();
+        // 升级数据库 schema
+        await upgradeSchema();
       }
+      
+      // 初始化 MinIO 客户端
       if (appConfig.minio && appConfig.minio.endPoint) {
         minioClient = new Minio.Client(appConfig.minio);
         console.log("MinIO client initialized.");
-        initMinioBucket();
+        // 初始化 MinIO 存储桶
+        await initMinioBucket();
       }
     } catch (e) { 
       console.error("Config load error:", e);
+      // 配置加载失败，标记系统未安装
       appConfig.installed = false;
     }
   } else {
+    // 配置文件不存在，标记系统未安装
     appConfig.installed = false;
   }
 }
 
+/**
+ * 升级数据库 schema
+ * @returns {Promise<void>}
+ */
 async function upgradeSchema() {
+  // 检查数据库连接池是否存在
   if (!dbPool) return;
   const client = await dbPool.connect();
   try {
-    // 基础用户表
+    // 创建用户表
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY, 
@@ -137,13 +422,13 @@ async function upgradeSchema() {
       );
     `);
 
-    // 修复 last_seen
+    // 检查并添加 last_seen 字段
     const checkCol = await client.query("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='last_seen'");
     if (checkCol.rows.length === 0) {
         await client.query("ALTER TABLE users ADD COLUMN last_seen TIMESTAMP DEFAULT NOW()");
     }
 
-    // QSO 表
+    // 创建 QSO 表
     await client.query(`
       CREATE TABLE IF NOT EXISTS qsos (
         id SERIAL PRIMARY KEY, 
@@ -151,7 +436,7 @@ async function upgradeSchema() {
         callsign VARCHAR(20),
         band VARCHAR(10),
         mode VARCHAR(10),
-        dxcc VARCHAR(10),
+        dxcc VARCHAR(100),
         country VARCHAR(100),
         qso_date VARCHAR(20),
         adif_raw JSONB NOT NULL, 
@@ -160,7 +445,13 @@ async function upgradeSchema() {
       );
     `);
 
-    // Awards 表 - 包含新字段 tracking_id, audit_log, reject_reason
+    // 检查并修改 dxcc 字段长度
+    const checkDxccCol = await client.query("SELECT character_maximum_length FROM information_schema.columns WHERE table_name='qsos' AND column_name='dxcc'");
+    if (checkDxccCol.rows.length > 0 && checkDxccCol.rows[0].character_maximum_length < 100) {
+        await client.query("ALTER TABLE qsos ALTER COLUMN dxcc TYPE VARCHAR(100)");
+    }
+
+    // 创建 Awards 表
     await client.query(`
       CREATE TABLE IF NOT EXISTS awards (
         id SERIAL PRIMARY KEY, 
@@ -185,6 +476,7 @@ async function upgradeSchema() {
     if (!cols.includes('audit_log')) await client.query("ALTER TABLE awards ADD COLUMN audit_log JSONB DEFAULT '[]'");
     if (!cols.includes('reject_reason')) await client.query("ALTER TABLE awards ADD COLUMN reject_reason TEXT");
 
+    // 创建 user_awards 表
     await client.query(`
         CREATE TABLE IF NOT EXISTS user_awards (
             id SERIAL PRIMARY KEY,
@@ -197,18 +489,18 @@ async function upgradeSchema() {
         );
     `);
     
-    // Check user_awards columns for upgrade
+    // 检查 user_awards 表的列 (用于旧数据库升级)
     const uaCols = await client.query("SELECT column_name FROM information_schema.columns WHERE table_name='user_awards'");
     const uaColNames = uaCols.rows.map(r => r.column_name);
     if (!uaColNames.includes('serial_number')) await client.query("ALTER TABLE user_awards ADD COLUMN serial_number VARCHAR(20)");
     if (!uaColNames.includes('level')) await client.query("ALTER TABLE user_awards ADD COLUMN level VARCHAR(50)");
     if (!uaColNames.includes('score_snapshot')) await client.query("ALTER TABLE user_awards ADD COLUMN score_snapshot INTEGER");
 
-
     console.log("Database schema checked.");
   } catch (err) {
     console.error("Schema upgrade error:", err.message);
   } finally {
+    // 释放数据库连接
     client.release();
   }
 }
@@ -219,15 +511,31 @@ async function upgradeSchema() {
  * ==========================================
  */
 
+/**
+ * 分类通联模式
+ * @param {string} mode - 通联模式字符串
+ * @returns {string} 分类后的模式类型: 'cw', 'phone' 或 'data'
+ */
 const categorizeMode = (mode) => {
+    // 转换为大写并处理空值
     mode = mode?.toUpperCase() || '';
-    if (['CW'].includes(mode)) return 'cw';
+    // 分类为 CW
+    if (['CW','PCW'].includes(mode)) return 'cw';
+    // 分类为 Phone
     if (['SSB', 'AM', 'FM', 'USB', 'LSB'].includes(mode)) return 'phone';
-    // All digital modes default to data
-    if (['FT8', 'FT4', 'RTTY', 'PSK31', 'JT65', 'JS8'].includes(mode)) return 'data';
+    // 分类为 Data
+    if (['FT8', 'FT4', 'RTTY', 'RTTYM', 'PSK31', 'FSK', 'PSK', 'JT65', 'JS8','SSTV'].includes(mode)) return 'data';
+    // 默认为 Data
     return 'data'; // Default to data for unknown
 };
 
+/**
+ * 评估用户是否符合奖状申请条件
+ * @param {number} userId - 用户 ID
+ * @param {number} awardId - 奖状 ID
+ * @param {boolean} includeQsos - 是否包含匹配的 QSO 详情
+ * @returns {Promise<Object>} 评估结果
+ */
 const evaluateAward = async (userId, awardId, includeQsos = false) => {
     const client = await dbPool.connect();
     try {
@@ -448,21 +756,33 @@ const evaluateAward = async (userId, awardId, includeQsos = false) => {
  * ==========================================
  */
 
+/**
+ * 验证 JWT 令牌的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const verifyToken = async (req, res, next) => {
+  // 安装路由和公开路由不需要验证
   if (!appConfig.installed && req.path.startsWith('/api/install')) return next();
   if (req.path === '/api/system-status' || req.path === '/api/auth/login' || req.path === '/api/auth/register') return next(); 
 
+  // 从请求头获取令牌
   const token = req.headers['authorization'];
   if (!token) return res.status(401).json({ error: 'TOKEN_MISSING', message: '未提供验证令牌' });
   
   let decoded;
   try {
+    // 验证令牌
     decoded = jwt.verify(token.split(' ')[1], appConfig.jwtSecret);
   } catch (err) { 
     return res.status(401).json({ error: 'TOKEN_INVALID', message: '无效或过期的令牌' }); 
   }
 
+  // 将解码后的用户信息存储到请求对象
   req.user = decoded; 
+  // 更新用户最后登录时间
   if (dbPool && req.user && req.user.id) {
       dbPool.query('UPDATE users SET last_seen = NOW() WHERE id = $1', [req.user.id])
           .catch(err => console.error("Update last_seen failed:", err.message));
@@ -470,25 +790,52 @@ const verifyToken = async (req, res, next) => {
   next();
 };
 
+/**
+ * 验证系统管理员权限的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const verifyAdmin = (req, res, next) => {
+  // 检查用户角色是否为 admin
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'PERMISSION_DENIED', message: '需要系统管理员权限' });
   next();
 };
 
+/**
+ * 验证奖状管理员权限的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const verifyAwardAdmin = (req, res, next) => {
+  // 检查用户角色是否为 admin 或 award_admin
   if (req.user.role !== 'admin' && req.user.role !== 'award_admin') return res.status(403).json({ error: 'PERMISSION_DENIED', message: '需要奖状管理员权限' });
   next();
 };
 
+/**
+ * 要求 2FA 验证的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const require2FA = async (req, res, next) => {
     try {
+        // 获取用户的 2FA 密钥
         const result = await dbPool.query('SELECT totp_secret FROM users WHERE id = $1', [req.user.id]);
         const secret = result.rows[0]?.totp_secret;
+        // 如果用户未启用 2FA，直接通过
         if (!secret) return next(); 
 
+        // 从请求头获取 2FA 验证码
         const code = req.headers['x-2fa-code']; 
         if (!code) return res.status(403).json({ error: '2FA_REQUIRED', message: '此操作需要2FA验证' });
         
+        // 验证 2FA 验证码
         if (!otplib.authenticator.check(code, secret)) {
             return res.status(403).json({ error: 'INVALID_2FA', message: '验证码错误' });
         }
@@ -496,11 +843,21 @@ const require2FA = async (req, res, next) => {
     } catch (e) { res.status(500).json({ error: 'Server Error' }); }
 };
 
+/**
+ * 要求密码确认的中间件
+ * @param {Object} req - 请求对象
+ * @param {Object} res - 响应对象
+ * @param {Function} next - 下一个中间件函数
+ * @returns {void}
+ */
 const requirePassword = async (req, res, next) => {
+    // 从请求体获取密码
     const { password } = req.body;
     if (!password) return res.status(400).json({ error: 'PASSWORD_REQUIRED', message: '需要密码确认' });
     try {
+        // 获取用户的密码哈希
         const r = await dbPool.query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
+        // 验证密码
         const match = await bcrypt.compare(password, r.rows[0].password_hash);
         if (!match) return res.status(401).json({ error: 'PASSWORD_INVALID', message: '密码错误' });
         next();
@@ -753,11 +1110,30 @@ app.post('/api/logbook/upload', verifyToken, upload.single('file'), async (req, 
         try {
             await client.query('BEGIN');
             for (let r of records) {
+                // 处理 dxcc 字段
+                let dxcc = '';
+                
+                // 优先级 1: 使用 COUNTRY 字段
+                if (r.country) {
+                    dxcc = r.country;
+                }
+                // 优先级 2: 使用 dxcc 字段（如果是数字，转换为名称）
+                else if (r.dxcc) {
+                    if (!isNaN(r.dxcc)) {
+                        dxcc = dxccCodeMap[r.dxcc] || r.dxcc;
+                    } else {
+                        dxcc = r.dxcc;
+                    }
+                }
+                // 优先级 3: 根据呼号推断
+                else {
+                    dxcc = inferDxccFromCallsign(r.call);
+                }
                 await client.query(`
                     INSERT INTO qsos (user_id, callsign, band, mode, qso_date, dxcc, country, adif_raw)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (user_id, callsign, band, mode, qso_date) DO NOTHING
-                `, [req.user.id, r.call || '', r.band || '', r.mode || '', r.qso_date || '', r.dxcc || '', r.country || '', JSON.stringify(r)]);
+                `, [req.user.id, r.call || '', r.band || '', r.mode || '', r.qso_date || '', dxcc || '', r.country || '', JSON.stringify(r)]);
                 imported++;
             }
             await client.query('COMMIT');
@@ -1014,7 +1390,7 @@ app.get('/api/user/qsos', verifyToken, async (req, res) => {
         // 3. Removed LIMIT to show all logs as requested
         // Explicitly selecting columns to match frontend expectations
         // FIXED: Removed 'state' from SELECT as it is not a column in qsos table
-        const r = await dbPool.query('SELECT id, callsign, band, mode, qso_date, country, adif_raw FROM qsos WHERE user_id=$1 ORDER BY qso_date DESC, id DESC', [req.user.id]);
+        const r = await dbPool.query('SELECT id, callsign, band, mode, qso_date, dxcc, country, adif_raw FROM qsos WHERE user_id=$1 ORDER BY qso_date DESC, id DESC', [req.user.id]);
         res.json(r.rows);
     } catch(e) {
         res.status(500).json({error: e.message});
@@ -1155,6 +1531,14 @@ app.post('/api/admin/settings', verifyToken, verifyAdmin, require2FA, async (req
 });
 
 // 启动
-loadConfig();
-const PORT = 9993;
-http.createServer(app).listen(PORT, () => console.log(`Server running on port ${PORT}`));
+async function startServer() {
+  try {
+    await loadConfig();
+    const PORT = 3003;
+    http.createServer(app).listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  } catch (error) {
+    console.error("Error starting server:", error);
+  }
+}
+
+startServer();

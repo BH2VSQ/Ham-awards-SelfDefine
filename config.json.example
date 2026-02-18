@@ -1,0 +1,21 @@
+{
+  "installed": true,
+  "jwtSecret": "your_jwt_secret_here",
+  "db": {
+    "user": "postgres",
+    "host": "localhost",
+    "database": "ham_awards",
+    "password": "your_database_password_here",
+    "port": "5432"
+  },
+  "minio": {
+    "endPoint": "localhost",
+    "port": 9000,
+    "useSSL": false,
+    "accessKey": "your_minio_access_key_here",
+    "secretKey": "your_minio_secret_key_here"
+  },
+  "minioBucket": "ham-awards",
+  "useHttps": false,
+  "adminPath": "admin"
+}

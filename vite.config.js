@@ -11,7 +11,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:9993' // 开发模式下代理 API 请求到后端 (Corrected port to match server.js)
+      '/api': 'http://localhost:3003' // 开发模式下代理 API 请求到后端
     }
   }
 });
